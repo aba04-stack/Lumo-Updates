@@ -1,0 +1,85 @@
+name: Publish Lumo update manifest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "releases/*.apk"
+      - ".github/workflows/publish-update.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools build-tools;35.0.0"
+
+      - name: Select highest version APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          best=""
+          best_code=-1
+          while IFS= read -r file; do
+            code="$(apkanalyzer manifest version-code "$file")"
+            app="$(apkanalyzer manifest application-id "$file")"
+            test "$app" = "app.lumo.files" || {
+              echo "Wrong applicationId in $file: $app" >&2
+              exit 1
+            }
+            if [ "$code" -gt "$best_code" ]; then
+              best="$file"
+              best_code="$code"
+            fi
+          done < <(find releases -maxdepth 1 -type f -name "*.apk" | sort)
+
+          test -n "$best"
+          echo "path=$best" >> "$GITHUB_OUTPUT"
+          echo "version_code=$best_code" >> "$GITHUB_OUTPUT"
+
+      - name: Build update manifest
+        env:
+          APK_PATH: ${{ steps.apk.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$APK_PATH"
+          version_code="$(apkanalyzer manifest version-code "$apk")"
+          version_name="$(apkanalyzer manifest version-name "$apk")"
+          sha256="$(sha256sum "$apk" | awk '{print $1}')"
+          size="$(stat -c '%s' "$apk")"
+          name="$(basename "$apk")"
+
+          python3 - <<PY
+          import json
+          from pathlib import Path
+          data = {
+              "versionCode": int("$version_code"),
+              "versionName": "$version_name",
+              "apkUrl": "https://raw.githubusercontent.com/aba04-stack/Lumo-Updates/main/releases/$name",
+              "sha256": "$sha256",
+              "size": int("$size"),
+              "mandatory": False,
+              "notes": "Новая версия Lumo."
+          }
+          Path("update.json").write_text(
+              json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Commit manifest
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          git diff --cached --quiet || git commit -m "Publish Lumo update manifest"
+          git push
