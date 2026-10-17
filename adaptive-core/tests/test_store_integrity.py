@@ -5,7 +5,28 @@ from threading import Barrier
 
 import pytest
 
-from adaptive_core import AdaptiveCore, EvolutionManager, Store, StrategyConfig
+from adaptive_core import AdaptiveCore, EvaluationCase, EvolutionManager, Store, StrategyConfig
+
+
+def _promote_second_strategy(core, baseline, strategy_id: str, task_type: str, instructions: str):
+    candidate = core.register_candidate(
+        StrategyConfig(
+            strategy_id, task_type, instructions,
+            version=baseline.config.version + 1,
+        ),
+        parent_id=baseline.config.strategy_id,
+    )
+    cases = [
+        EvaluationCase(f"{strategy_id}-case-{i}", task_type, f"fixed-input-{i}", "expected")
+        for i in range(1, 6)
+    ]
+    decision = EvolutionManager(core).evaluate_candidate(
+        strategy_id,
+        cases,
+        lambda strategy, case: 0.95 if strategy.strategy_id == strategy_id else 0.60,
+    )
+    assert decision.accepted, decision.reason
+    return core.store.get_strategy(strategy_id)
 
 
 def test_event_store_rejects_non_object_and_non_json_payloads() -> None:
@@ -34,10 +55,8 @@ def test_rollback_emits_auditable_transition_and_keeps_fallback(tmp_path) -> Non
     with Store(db) as store:
         core = AdaptiveCore(store)
         baseline = core.create_baseline("integrity")
-        challenger = store.create_strategy(
-            StrategyConfig("integrity-challenger", "integrity", "Candidate."),
-            status="active",
-            parent_id=baseline.config.strategy_id,
+        challenger = _promote_second_strategy(
+            core, baseline, "integrity-challenger", "integrity", "Candidate."
         )
         EvolutionManager(core).rollback(challenger.config.strategy_id)
         assert store.get_strategy(challenger.config.strategy_id).status == "disabled"
@@ -53,10 +72,8 @@ def test_concurrent_rollbacks_never_disable_every_active_strategy(tmp_path) -> N
     with Store(db) as setup:
         core = AdaptiveCore(setup)
         first = core.create_baseline("concurrent-integrity")
-        second = setup.create_strategy(
-            StrategyConfig("concurrent-second", "concurrent-integrity", "Second strategy."),
-            status="active",
-            parent_id=first.config.strategy_id,
+        second = _promote_second_strategy(
+            core, first, "concurrent-second", "concurrent-integrity", "Second strategy."
         )
         ids = [first.config.strategy_id, second.config.strategy_id]
 
@@ -85,10 +102,8 @@ def test_feedback_is_not_recorded_for_disabled_strategies() -> None:
     with Store(":memory:") as store:
         core = AdaptiveCore(store)
         first = core.create_baseline("feedback-integrity")
-        second = store.create_strategy(
-            StrategyConfig("feedback-fallback", "feedback-integrity", "Fallback."),
-            status="active",
-            parent_id=first.config.strategy_id,
+        second = _promote_second_strategy(
+            core, first, "feedback-fallback", "feedback-integrity", "Fallback."
         )
         EvolutionManager(core).rollback(first.config.strategy_id)
         with pytest.raises(ValueError, match="only active"):
