@@ -35,17 +35,28 @@ class AutonomousLearningLoop:
         topic = payload.get("topic")
         return topic.strip() if isinstance(topic, str) and topic.strip() else None
 
-    def queue_topic(self, topic: str, *, priority: float = 0.5, reason: str = "curiosity") -> bool:
+    def queue_topic(
+        self, topic: str, *, priority: float = 0.5,
+        reason: str = "curiosity", drive: str | None = None,
+    ) -> bool:
         if not isinstance(topic, str) or not topic.strip() or len(topic) > 180:
             raise ValueError("topic must contain 1-180 characters")
         if not isinstance(reason, str) or not reason.strip() or len(reason) > 100:
             raise ValueError("reason must contain 1-100 characters")
         priority = validate_score(priority)
         normalized = topic.strip()
+        selected_drive = drive or self.cognitive.motivation.drive_for_reason(reason)
+        # Validate the drive before writing either the goal or the queue event.
+        self.cognitive.motivation.goal_score(selected_drive, priority)
         known = {value.casefold() for event in self._events() if event["event_type"] == "autonomous-topic-queued" if (value := self._topic(event["payload"])) is not None}
         if normalized.casefold() in known:
             return False
-        self.store.record_event("autonomous-topic-queued", "autonomous-research", {"topic": normalized, "priority": priority, "reason": reason})
+        self.cognitive.motivation.add_goal(
+            normalized, drive=selected_drive, priority=priority, rationale=reason
+        )
+        self.store.record_event("autonomous-topic-queued", "autonomous-research", {
+            "topic": normalized, "priority": priority, "reason": reason, "drive": selected_drive
+        })
         return True
 
     def _history(self) -> tuple[list[dict[str, Any]], set[str], dict[str, int]]:
@@ -56,7 +67,13 @@ class AutonomousLearningLoop:
             if event["event_type"] == "autonomous-topic-queued":
                 topic = self._topic(payload)
                 if topic is not None:
-                    queued.append({"topic": topic, "priority": float(payload.get("priority", 0.5)), "reason": str(payload.get("reason", "curiosity"))})
+                    reason = str(payload.get("reason", "curiosity"))
+                    queued.append({
+                        "topic": topic,
+                        "priority": float(payload.get("priority", 0.5)),
+                        "reason": reason,
+                        "drive": str(payload.get("drive") or self.cognitive.motivation.drive_for_reason(reason)),
+                    })
             elif event["event_type"] == "autonomous-research-step":
                 topic = payload.get("topic")
                 if isinstance(topic, str) and topic:
@@ -73,10 +90,15 @@ class AutonomousLearningLoop:
             topic, key = item["topic"], item["topic"].casefold()
             if key in successful or key in session_attempted or attempts.get(key, 0) >= 2:
                 continue
-            score = item["priority"]
             reason = item.get("reason", "curiosity")
-            # Curiosity favours newly discovered topics; frustration shifts attention away
-            # from repeated low-yield goals and toward another line of inquiry.
+            drive = item.get("drive") or self.cognitive.motivation.drive_for_reason(reason)
+            # Migrate topics created by older versions into the persistent goal ledger.
+            self.cognitive.motivation.add_goal(
+                topic, drive=drive, priority=item["priority"], rationale=reason
+            )
+            score = self.cognitive.motivation.goal_score(drive, item["priority"])
+            # Learned affect still modulates exploration, while drive pressure can
+            # shift priority toward competence, coherence, or reducing uncertainty.
             if reason == "derived_from_new_material":
                 score += 0.5 * state.curiosity
             else:
@@ -117,6 +139,20 @@ class AutonomousLearningLoop:
         if query is None:
             return {"status": "idle", "reason": "no_unattempted_topics", "documents_found": 0}
         session_attempted.add(query.casefold())
+        queue_record = next((
+            event["payload"] for event in self._events()
+            if event["event_type"] == "autonomous-topic-queued"
+            and (queued_topic := self._topic(event["payload"])) is not None
+            and queued_topic.casefold() == query.casefold()
+        ), {})
+        goal_reason = str(queue_record.get("reason", "curiosity"))
+        goal_drive = str(queue_record.get("drive") or self.cognitive.motivation.drive_for_reason(goal_reason))
+        goal = self.cognitive.motivation.add_goal(
+            query, drive=goal_drive,
+            priority=validate_score(queue_record.get("priority", 0.5)),
+            rationale=goal_reason,
+        )
+        goal = self.cognitive.motivation.set_goal_status(goal.goal_id, "active")
         prior_documents = self.cognitive.internet.recall("", limit=20)
         known_terms: set[str] = set()
         for prior in prior_documents:
@@ -151,13 +187,28 @@ class AutonomousLearningLoop:
         })
         # This feedback measures retrieval usefulness/new information only. It is
         # not a score for factual truth, source quality, or correctness of claims.
+        uncertainty_signal = 0.90 if not documents else 0.70
+        novelty_signal = min(1.0, len(new_terms) / 10.0)
+        succeeded = bool(documents) and error is None
         self.cognitive.affect.appraise(
-            succeeded=bool(documents) and error is None,
+            succeeded=succeeded,
             progress=information_gain,
-            uncertainty=0.90 if not documents else 0.70,
+            uncertainty=uncertainty_signal,
             contradiction=0.0,
-            novelty=min(1.0, len(new_terms) / 10.0),
+            novelty=novelty_signal,
             feedback=information_gain if documents else -0.5,
+        )
+        # Need pressures are updated from retrieval progress and explicit appraisal
+        # signals. Retrieved text remains unverified; this is not a truth assessment.
+        drive_state = self.cognitive.motivation.update_outcome(
+            succeeded=succeeded,
+            progress=information_gain,
+            uncertainty=uncertainty_signal,
+            contradiction=0.0,
+            novelty=novelty_signal,
+        )
+        goal = self.cognitive.motivation.set_goal_status(
+            goal.goal_id, "completed" if documents else "deferred"
         )
         return {
             "status": status, "topic": query, "documents_found": len(documents),
@@ -165,6 +216,8 @@ class AutonomousLearningLoop:
             "relevant_excerpts": list(review.relevant_excerpts), "caveat": review.caveat,
             "discovered_terms": sorted(discovered_terms)[:30], "new_terms": sorted(new_terms)[:30], "next_topics": next_topics,
             "retrieval_utility": information_gain, "retrieval_utility_is_truth_score": False, "error": error,
+            "goal_id": goal.goal_id, "goal_status": goal.status, "drive": goal.drive,
+            "drive_state": asdict(drive_state),
         }
 
     def run(self, *, max_steps: int = 3, page_budget: int = 6) -> dict[str, Any]:
@@ -187,4 +240,10 @@ class AutonomousLearningLoop:
             "pages_budget_remaining": remaining, "documents_found": sum(item["documents_found"] for item in results),
             "results": results, "affect": asdict(self.cognitive.affect.state()),
             "affect_model_samples": self.cognitive.affect.model_snapshot()["samples"],
+            "motivation": asdict(self.cognitive.motivation.state()),
+            "active_goals": [goal.__dict__ if hasattr(goal, "__dict__") else {
+                "goal_id": goal.goal_id, "title": goal.title, "drive": goal.drive,
+                "priority": goal.priority, "rationale": goal.rationale, "status": goal.status,
+                "created_at": goal.created_at, "updated_at": goal.updated_at,
+            } for goal in self.cognitive.motivation.goals(status="active")],
         }
