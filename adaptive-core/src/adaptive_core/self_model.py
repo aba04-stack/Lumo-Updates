@@ -56,10 +56,12 @@ class SelfModel:
         # Heuristic indicator of evidence volume, not a statistical confidence interval.
         evidence_strength = count / (count + 10.0) if count else 0.0
         failures: list[str] = []
-        for event in self.core.store.recent_events(self.history_window):
-            if event["task_type"] != task_type or event["event_type"] not in self.FAILURE_EVENTS:
-                continue
-            if event["event_type"] not in failures:
+        for event in self.core.store.events_of_types(
+            list(self.FAILURE_EVENTS),
+            limit=self.history_window,
+            newest_first=True,
+        ):
+            if event["task_type"] == task_type and event["event_type"] not in failures:
                 failures.append(event["event_type"])
         limits: list[str] = []
         if count < 5:
