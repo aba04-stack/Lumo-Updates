@@ -38,6 +38,10 @@ class KnowledgeFact:
             raise ValueError("value must contain 1-2,000 characters")
         if not isinstance(self.source, str) or not self.source.strip() or len(self.source) > 2000:
             raise ValueError("source must contain 1-2,000 characters")
+        if self.inferred_by is not None and (
+            not isinstance(self.inferred_by, str) or not self.inferred_by.strip() or len(self.inferred_by) > 128
+        ):
+            raise ValueError("inferred_by must be a 1-128 character string or None")
         object.__setattr__(self, "confidence", validate_score(self.confidence))
 
 @dataclass(frozen=True, slots=True)
@@ -49,15 +53,34 @@ class InferenceRule:
     explanation: str
     reliability: float = 0.8
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", self.rule_id):
+        if not isinstance(self.rule_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", self.rule_id
+        ):
             raise ValueError("rule_id must be a 1-128 character ASCII identifier")
-        if not self.premises or len(self.premises) > 20:
+        if isinstance(self.premises, (str, bytes)) or not isinstance(self.premises, (list, tuple)):
+            raise ValueError("premises must be a list/tuple of predicate-value pairs")
+        if not 1 <= len(self.premises) <= 20:
             raise ValueError("a rule must have 1-20 premises")
-        if any(not key.strip() or not value.strip() for key, value in self.premises):
-            raise ValueError("rule premises must be non-empty")
-        if len(self.conclusion) != 2 or not self.conclusion[0].strip() or not self.conclusion[1].strip():
-            raise ValueError("rule conclusion must contain predicate and value")
-        if not self.explanation.strip() or len(self.explanation) > 2000:
+        normalized_premises: list[tuple[str, str]] = []
+        for premise in self.premises:
+            if not isinstance(premise, (list, tuple)) or len(premise) != 2:
+                raise ValueError("each rule premise must be a predicate-value pair")
+            key, value = premise
+            if (
+                not isinstance(key, str) or not key.strip()
+                or not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError("rule premises must contain non-empty strings")
+            normalized_premises.append((key.strip(), value.strip()))
+        object.__setattr__(self, "premises", tuple(normalized_premises))
+        if (
+            not isinstance(self.conclusion, (list, tuple))
+            or len(self.conclusion) != 2
+            or any(not isinstance(value, str) or not value.strip() for value in self.conclusion)
+        ):
+            raise ValueError("rule conclusion must contain a predicate and value")
+        object.__setattr__(self, "conclusion", (self.conclusion[0].strip(), self.conclusion[1].strip()))
+        if not isinstance(self.explanation, str) or not self.explanation.strip() or len(self.explanation) > 2000:
             raise ValueError("explanation must contain 1-2,000 characters")
         object.__setattr__(self, "reliability", validate_score(self.reliability))
 
