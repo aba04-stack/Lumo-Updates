@@ -27,11 +27,17 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_MAX_JSON_BYTES = 1_000_000
+
+
 def _json_dump(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
     except (TypeError, ValueError) as exc:
-        raise ValueError("value must be JSON-serializable") from exc
+        raise ValueError("value must be finite JSON-serializable data") from exc
+    if len(encoded.encode("utf-8")) > _MAX_JSON_BYTES:
+        raise ValueError("serialized JSON payload exceeds the 1,000,000-byte limit")
+    return encoded
 
 
 class Store:
@@ -87,6 +93,7 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_type_id ON events(event_type, id);
                 CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_type, id);
+                CREATE INDEX IF NOT EXISTS idx_events_task_type_id ON events(task_type, event_type, id);
                 CREATE TABLE IF NOT EXISTS episodes (
                     episode_id TEXT PRIMARY KEY,
                     task_type TEXT NOT NULL,
@@ -640,6 +647,7 @@ class Store:
         *,
         limit: int | None = None,
         newest_first: bool = False,
+        task_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Query selected event streams; optionally return all matching history."""
         if (
@@ -654,10 +662,18 @@ class Store:
             isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100_000
         ):
             raise ValueError("limit must be None or an integer from 1 to 100,000")
+        if not isinstance(newest_first, bool):
+            raise ValueError("newest_first must be a bool")
+        if task_type is not None:
+            validate_identifier(task_type, "task_type")
         placeholders = ",".join("?" for _ in event_types)
         direction = "DESC" if newest_first else "ASC"
-        query = f"SELECT * FROM events WHERE event_type IN ({placeholders}) ORDER BY id {direction}"
+        query = f"SELECT * FROM events WHERE event_type IN ({placeholders})"
         args: tuple[Any, ...] = tuple(event_types)
+        if task_type is not None:
+            query += " AND task_type = ?"
+            args += (task_type,)
+        query += f" ORDER BY id {direction}"
         if limit is not None:
             query += " LIMIT ?"
             args += (limit,)
