@@ -204,3 +204,57 @@ def test_self_model_failure_history_survives_unrelated_event_noise() -> None:
 
         report = cognitive.self_model.report("reasoning")
         assert "task-execution-failed" in report.recent_failure_events
+
+
+@pytest.mark.parametrize("bad_kwargs, message", [
+    ({"summary": ""}, "summary"),
+    ({"summary": "x" * 10_001}, "summary"),
+    ({"tags": "not-a-list"}, "tags"),
+    ({"tags": ["valid", []]}, "each tag"),
+    ({"metadata": []}, "metadata"),
+    ({"metadata": {"uncertainty": float("nan")}}, "score"),
+    ({"metadata": {"contradiction": 1.5}}, "score"),
+    ({"metadata": {"novelty": "high"}}, "score"),
+    ({"score": float("nan")}, "score"),
+    ({"success": 1}, "success"),
+])
+def test_invalid_outcome_is_rejected_before_any_feedback_is_written(
+    bad_kwargs: dict, message: str
+) -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        baseline = core.create_baseline("reasoning")
+        cognitive = CognitiveSystem(core)
+        kwargs = {
+            "task_type": "reasoning",
+            "strategy_id": baseline.config.strategy_id,
+            "summary": "A valid measured result.",
+            "tags": ["checked"],
+            "score": 0.8,
+            "success": True,
+            "metadata": {"uncertainty": 0.2, "contradiction": 0.0, "novelty": 0.1},
+        }
+        kwargs.update(bad_kwargs)
+
+        with pytest.raises(ValueError, match=message):
+            cognitive.learn_from_outcome(**kwargs)
+
+        assert store.total_observations("reasoning") == 0
+        assert store.search_episodes(task_type="reasoning") == []
+
+
+def test_invalid_feedback_for_unknown_strategy_has_no_persisted_episode() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        core.create_baseline("reasoning")
+        cognitive = CognitiveSystem(core)
+        with pytest.raises(KeyError, match="unknown strategy"):
+            cognitive.learn_from_outcome(
+                task_type="reasoning",
+                strategy_id="missing-strategy",
+                summary="This must not be persisted as a memory.",
+                score=0.8,
+                success=True,
+            )
+        assert store.total_observations("reasoning") == 0
+        assert store.search_episodes(task_type="reasoning") == []
