@@ -48,3 +48,11 @@ def test_idna_and_punycode_variants_share_the_same_publisher_identity() -> None:
     unicode_domain = registered_publisher_domain("https://bücher.example/article")
     ascii_domain = registered_publisher_domain("https://xn--bcher-kva.example/other")
     assert unicode_domain == ascii_domain == "xn--bcher-kva.example"
+
+
+def test_unicode_and_idna_host_spellings_resolve_to_the_same_publisher() -> None:
+    unicode_url = "https://bücher.example/article"
+    idna_url = "https://xn--bcher-kva.example/article"
+    assert safe_https_source_url(unicode_url) is not None
+    assert safe_https_source_url(idna_url) is not None
+    assert registered_publisher_domain(unicode_url) == registered_publisher_domain(idna_url)
