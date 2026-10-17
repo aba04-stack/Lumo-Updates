@@ -224,7 +224,8 @@ class ClaimVerificationEngine:
         raw_summary = raw.get("summary")
         raw_urls = raw.get("evidence_urls")
         if (
-            raw_status not in _ALLOWED_ASSESSMENTS
+            not isinstance(raw_status, str)
+            or raw_status not in _ALLOWED_ASSESSMENTS
             or isinstance(raw_confidence, bool)
             or not isinstance(raw_confidence, (int, float))
             or not math.isfinite(float(raw_confidence))
