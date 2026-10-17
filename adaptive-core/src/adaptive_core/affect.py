@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from typing import Any
 
 from .models import validate_score
@@ -100,7 +101,12 @@ class AffectEngine:
         self.learning_rate = float(learning_rate)
 
     @staticmethod
-    def _features(values: dict[str, float]) -> dict[str, float]:
+    def _features(values: Mapping[str, float]) -> dict[str, float]:
+        if not isinstance(values, Mapping):
+            raise ValueError("features must be a mapping of known feature names to scores")
+        unknown = set(values) - set(_FEATURES)
+        if unknown:
+            raise ValueError(f"unsupported appraisal features: {', '.join(sorted(map(str, unknown))[:10])}")
         return {name: validate_score(values.get(name, 0.0)) for name in _FEATURES}
 
     @staticmethod
@@ -196,7 +202,7 @@ class AffectEngine:
 
     def update(self, event_type: str, *, intensity: float = 1.0) -> AffectState:
         """Update from a known appraisal event using the shared weighted model."""
-        if event_type not in _EVENT_FEATURES:
+        if not isinstance(event_type, str) or event_type not in _EVENT_FEATURES:
             raise ValueError(f"unsupported appraisal event: {event_type}")
         intensity = validate_score(intensity)
         features = {
