@@ -194,3 +194,13 @@ def test_invalid_status_types_fail_with_validation_error() -> None:
         goal = engine.add_goal("Validate API inputs", drive="competence")
         with pytest.raises(ValueError, match="unsupported goal status"):
             engine.set_goal_status(goal.goal_id, [])
+
+
+def test_drive_state_ignores_malformed_latest_state_event() -> None:
+    with Store(":memory:") as store:
+        engine = MotivationEngine(store)
+        expected = engine.update_outcome(
+            succeeded=False, progress=0.2, uncertainty=0.8, novelty=0.3
+        )
+        store.record_event("motivation-state-updated", "motivation", {"state": "corrupted"})
+        assert engine.state() == expected
