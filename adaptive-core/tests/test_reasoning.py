@@ -317,3 +317,16 @@ def test_inference_rule_freezes_mutable_pairs_and_rejects_malformed_values() -> 
 def test_knowledge_fact_rejects_malformed_provenance_type() -> None:
     with pytest.raises(ValueError, match="inferred_by"):
         KnowledgeFact("p", "v", "source", inferred_by=["not", "an", "id"])
+
+
+def test_reasoner_skips_oversized_external_documents() -> None:
+    engine = ReasoningEngine()
+    huge = {
+        "title": "x" * 501,
+        "url": "https://source.example/huge",
+        "content": "A claim. " * 3_000,
+    }
+    assert engine.extract_claims([huge]) == ()
+    review = engine.review_documents("claim", [huge])
+    assert review.source_urls == ()
+    assert review.extracted_claims == ()
