@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from adaptive_core import AdaptiveCore, CognitiveSystem, MotivationEngine, Store
+from adaptive_core import AffectEngine, AdaptiveCore, CognitiveSystem, MotivationEngine, Store
 
 
 def test_drive_pressures_change_from_outcome_and_persist(tmp_path) -> None:
@@ -56,7 +56,10 @@ def test_goal_lifecycle_is_persistent_and_idempotent(tmp_path) -> None:
         assert restored.goal_id == goal.goal_id
         assert restored.status == "deferred"
         engine = MotivationEngine(reopened)
-        engine.set_goal_status(goal.goal_id, "completed")
+        needs_review = engine.set_goal_status(goal.goal_id, "needs_verification")
+        assert needs_review.status == "needs_verification"
+        completed = engine.set_goal_status(goal.goal_id, "completed")
+        assert completed.status == "completed"
         with pytest.raises(ValueError, match="invalid goal transition"):
             engine.set_goal_status(goal.goal_id, "queued")
 
@@ -98,3 +101,36 @@ def test_invalid_drive_signals_are_rejected() -> None:
             engine.update_outcome(succeeded=True, progress=float("nan"))
         with pytest.raises(ValueError, match="unsupported drive"):
             engine.add_goal("Bad goal", drive="human-soul")
+
+def test_current_state_and_goal_history_survive_long_unrelated_event_log(tmp_path) -> None:
+    path = tmp_path / "long-history.sqlite3"
+    with Store(path) as store:
+        core = AdaptiveCore(store)
+        baseline = core.create_baseline("reasoning")
+        cognitive = CognitiveSystem(core)
+        cognitive.learn_from_outcome(
+            task_type="reasoning",
+            strategy_id=baseline.config.strategy_id,
+            summary="A failed test showed unresolved uncertainty.",
+            tags=["test"],
+            score=0.2,
+            success=False,
+            metadata={"uncertainty": 0.9},
+        )
+        goal = cognitive.motivation.add_goal(
+            "Recheck a disputed claim", drive="uncertainty_reduction", priority=0.8
+        )
+        cognitive.motivation.set_goal_status(goal.goal_id, "needs_verification")
+        affect_before = cognitive.affect.state()
+        drive_before = cognitive.motivation.state()
+
+        for index in range(10_005):
+            store.record_event("unrelated-noise", "stress-test", {"index": index})
+
+    with Store(path) as reopened:
+        cognitive = CognitiveSystem(AdaptiveCore(reopened))
+        assert cognitive.affect.state() == affect_before
+        assert cognitive.motivation.state() == drive_before
+        goals = cognitive.motivation.goals(status="needs_verification")
+        assert len(goals) == 1
+        assert goals[0].goal_id == goal.goal_id
