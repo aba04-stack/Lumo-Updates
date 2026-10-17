@@ -108,22 +108,30 @@ class CognitiveSystem:
                 signals.get("novelty", 0.0),
             ),
         )
-        self.core.record_result(strategy_id, score, success, metadata)
-        episode = self.memory.remember(task_type, summary, tags=tags, strategy_id=strategy_id,
-                                       score=score, success=success, metadata=metadata)
+        # Observation, episodic memory, affect-learning weights, affect state,
+        # drive state and their audit events must commit together. A late failure
+        # must not leave only a strategy score or only half a learned state.
+        with self.store.transaction():
+            self.core.record_result(strategy_id, score, success, metadata)
+            episode = self.memory.remember(
+                task_type, summary, tags=tags, strategy_id=strategy_id,
+                score=score, success=success, metadata=metadata,
+            )
+            self.affect.appraise(
+                succeeded=success, progress=score, uncertainty=uncertainty,
+                contradiction=contradiction, novelty=novelty,
+            )
+            self.motivation.update_outcome(
+                succeeded=success, progress=score, uncertainty=uncertainty,
+                contradiction=contradiction, novelty=novelty,
+            )
+        # Workspace is transient in-memory attention state, so publish only after
+        # persistent feedback has committed successfully.
         self.perceive(
             signal_id=f"outcome:{episode['episode_id'].split(':')[-1]}",
             kind="outcome", source="evaluation",
             content=f"{task_type}: {'success' if success else 'failure'}, score={score:.3f}; {summary[:1500]}",
             priority=0.8 if not success else 0.6, confidence=0.9,
-        )
-        self.affect.appraise(
-            succeeded=success, progress=score, uncertainty=uncertainty,
-            contradiction=contradiction, novelty=novelty,
-        )
-        self.motivation.update_outcome(
-            succeeded=success, progress=score, uncertainty=uncertainty,
-            contradiction=contradiction, novelty=novelty,
         )
         return episode
 
