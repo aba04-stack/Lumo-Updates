@@ -92,22 +92,25 @@ class AdaptiveRunner:
             # No score is recorded: a broken grader must not poison adaptation.
             raise
 
-        self.core.record_result(
-            strategy.config.strategy_id,
-            assessment.score,
-            assessment.success,
-            dict(assessment.metadata),
-        )
-        self.store.record_event(
-            "task-completed",
-            task_type,
-            {
-                "strategy_id": strategy.config.strategy_id,
-                "score": assessment.score,
-                "success": assessment.success,
-                "duration_ms": round(duration_ms, 3),
-            },
-        )
+        # Score and completion telemetry must agree. If either write fails,
+        # roll back both so adaptation never sees an unlogged partial success.
+        with self.store.transaction():
+            self.core.record_result(
+                strategy.config.strategy_id,
+                assessment.score,
+                assessment.success,
+                dict(assessment.metadata),
+            )
+            self.store.record_event(
+                "task-completed",
+                task_type,
+                {
+                    "strategy_id": strategy.config.strategy_id,
+                    "score": assessment.score,
+                    "success": assessment.success,
+                    "duration_ms": round(duration_ms, 3),
+                },
+            )
         return RunResult(
             strategy_id=strategy.config.strategy_id,
             output=output,
