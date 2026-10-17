@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from statistics import fmean
 import threading
+from contextlib import contextmanager
+from statistics import fmean
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .models import StoredStrategy, StrategyConfig, validate_identifier, validate_score
 
@@ -42,6 +43,7 @@ class Store:
             Path(raw_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
             raw_path = str(Path(raw_path).expanduser())
         self._lock = threading.RLock()
+        self._savepoint_counter = 0
         self._connection = sqlite3.connect(
             raw_path, timeout=10.0, check_same_thread=False, isolation_level=None
         )
@@ -101,6 +103,45 @@ class Store:
                 """
             )
 
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Compose writes atomically, using savepoints for nested store operations.
+
+        The lock remains held for the complete transaction, so another thread
+        cannot accidentally join this connection's in-flight transaction.
+        """
+        with self._lock:
+            nested = self._connection.in_transaction
+            savepoint: str | None = None
+            if nested:
+                self._savepoint_counter += 1
+                savepoint = f"adaptive_sp_{self._savepoint_counter}"
+                self._connection.execute(f"SAVEPOINT {savepoint}")
+            else:
+                self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+            except BaseException:
+                if savepoint is not None:
+                    self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                elif self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+            else:
+                try:
+                    if savepoint is not None:
+                        self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    else:
+                        self._connection.execute("COMMIT")
+                except BaseException:
+                    if savepoint is not None and self._connection.in_transaction:
+                        self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                        self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    elif self._connection.in_transaction:
+                        self._connection.execute("ROLLBACK")
+                    raise
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
@@ -146,9 +187,8 @@ class Store:
             if parent.config.task_type != config.task_type:
                 raise ValueError("parent and child strategies must have the same task_type")
         created_at = _utc_now()
-        with self._lock:
-            try:
-                self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            with self.transaction():
                 self._connection.execute(
                     """
                     INSERT INTO strategies
@@ -157,33 +197,18 @@ class Store:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        config.strategy_id,
-                        config.task_type,
-                        config.version,
-                        config.instructions,
-                        _json_dump(config.parameters),
-                        status,
-                        parent_id,
-                        created_at,
+                        config.strategy_id, config.task_type, config.version,
+                        config.instructions, _json_dump(config.parameters), status,
+                        parent_id, created_at,
                     ),
                 )
-                # Keep the strategy row and its audit event in one transaction.
                 self.record_event(
-                    "strategy-created",
-                    config.task_type,
+                    "strategy-created", config.task_type,
                     {"strategy_id": config.strategy_id, "status": status, "parent_id": parent_id},
                 )
-                self._connection.execute("COMMIT")
-            except sqlite3.IntegrityError as exc:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-                raise ValueError(f"strategy could not be inserted: {exc}") from exc
-            except Exception:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-                raise
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"strategy could not be inserted: {exc}") from exc
         return self.get_strategy(config.strategy_id)
-
     def get_strategy(self, strategy_id: str) -> StoredStrategy:
         validate_identifier(strategy_id, "strategy_id")
         with self._lock:
@@ -211,84 +236,60 @@ class Store:
         return [self._from_row(row) for row in rows]
 
     def set_status(
-        self,
-        strategy_id: str,
-        new_status: str,
-        *,
-        expected_status: str | None = None,
+        self, strategy_id: str, new_status: str, *, expected_status: str | None = None,
     ) -> StoredStrategy:
         if not isinstance(strategy_id, str) or not strategy_id:
             raise ValueError("strategy_id must be a non-empty string")
         if not isinstance(new_status, str) or new_status not in _STATUSES:
             raise ValueError(f"unsupported status: {new_status}")
-        if expected_status is not None and (not isinstance(expected_status, str) or expected_status not in _STATUSES):
+        if expected_status is not None and (
+            not isinstance(expected_status, str) or expected_status not in _STATUSES
+        ):
             raise ValueError("expected_status must be a supported status or None")
-        with self._lock:
-            try:
-                self._connection.execute("BEGIN IMMEDIATE")
-                row = self._connection.execute(
-                    "SELECT task_type, status, version FROM strategies WHERE strategy_id = ?",
-                    (strategy_id,),
-                ).fetchone()
-                if row is None:
-                    raise KeyError(f"unknown strategy: {strategy_id}")
-                old_status = row["status"]
-                if expected_status is not None and old_status != expected_status:
-                    raise RuntimeError(
-                        f"status changed concurrently: expected {expected_status}, found {old_status}"
-                    )
-                if old_status != new_status and new_status not in _TRANSITIONS[old_status]:
-                    raise ValueError(f"invalid status transition: {old_status} -> {new_status}")
-                if old_status == "candidate" and new_status == "active":
-                    raise ValueError(
-                        "candidate activation requires a successful fixed-case evaluation"
-                    )
-                if old_status == "active" and new_status == "disabled":
-                    remaining = self._connection.execute(
-                        "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
-                        (row["task_type"],),
-                    ).fetchone()["n"]
-                    if int(remaining) <= 1:
-                        raise ValueError("cannot disable the last active strategy; no safe fallback would remain")
-                if old_status != new_status:
-                    self._connection.execute(
-                        "UPDATE strategies SET status = ? WHERE strategy_id = ?",
-                        (new_status, strategy_id),
-                    )
-                    # Keep the state transition and audit event in the same transaction.
-                    self.record_event(
-                        "strategy-status-changed",
-                        row["task_type"],
-                        {"strategy_id": strategy_id, "from": old_status, "to": new_status},
-                    )
-                self._connection.execute("COMMIT")
-            except Exception:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-                raise
+        with self.transaction():
+            row = self._connection.execute(
+                "SELECT task_type, status, version FROM strategies WHERE strategy_id = ?",
+                (strategy_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown strategy: {strategy_id}")
+            old_status = row["status"]
+            if expected_status is not None and old_status != expected_status:
+                raise RuntimeError(
+                    f"status changed concurrently: expected {expected_status}, found {old_status}"
+                )
+            if old_status != new_status and new_status not in _TRANSITIONS[old_status]:
+                raise ValueError(f"invalid status transition: {old_status} -> {new_status}")
+            if old_status == "candidate" and new_status == "active":
+                raise ValueError("candidate activation requires a successful fixed-case evaluation")
+            if old_status == "active" and new_status == "disabled":
+                remaining = self._connection.execute(
+                    "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
+                    (row["task_type"],),
+                ).fetchone()["n"]
+                if int(remaining) <= 1:
+                    raise ValueError("cannot disable the last active strategy; no safe fallback would remain")
+            if old_status != new_status:
+                self._connection.execute(
+                    "UPDATE strategies SET status = ? WHERE strategy_id = ?",
+                    (new_status, strategy_id),
+                )
+                self.record_event(
+                    "strategy-status-changed", row["task_type"],
+                    {"strategy_id": strategy_id, "from": old_status, "to": new_status},
+                )
         return self.get_strategy(strategy_id)
-
     def _promote_candidate_from_evaluation(
-        self,
-        candidate_id: str,
-        baseline_id: str,
-        *,
+        self, candidate_id: str, baseline_id: str, *,
         case_ids: list[str] | tuple[str, ...],
         baseline_scores: list[float] | tuple[float, ...],
         candidate_scores: list[float] | tuple[float, ...],
-        minimum_gain: float,
-        max_case_regression: float,
+        minimum_gain: float, max_case_regression: float,
     ) -> StoredStrategy:
-        """Atomically promote a candidate only when its per-case evaluation passes.
-
-        This internal API recomputes all aggregate quality gates and persists the
-        evidence and status change in one transaction. Application callers should
-        use EvolutionManager rather than changing statuses directly.
-        """
+        """Atomically promote a candidate only when its per-case evaluation passes."""
         validate_identifier(candidate_id, "candidate_id")
         validate_identifier(baseline_id, "baseline_id")
-        minimum_gain = validate_score(minimum_gain)
-        max_case_regression = validate_score(max_case_regression)
+        minimum_gain, max_case_regression = validate_score(minimum_gain), validate_score(max_case_regression)
         if isinstance(case_ids, (str, bytes)) or not isinstance(case_ids, (list, tuple)):
             raise ValueError("case_ids must be a list/tuple")
         if isinstance(baseline_scores, (str, bytes)) or not isinstance(baseline_scores, (list, tuple)):
@@ -303,137 +304,109 @@ class Store:
             raise ValueError("case_ids must be unique")
         if len(baseline_scores) != len(case_ids) or len(candidate_scores) != len(case_ids):
             raise ValueError("each evaluation case must have baseline and candidate scores")
-        base_values = [validate_score(value) for value in baseline_scores]
-        trial_values = [validate_score(value) for value in candidate_scores]
+        base_values, trial_values = (
+            [validate_score(value) for value in baseline_scores],
+            [validate_score(value) for value in candidate_scores],
+        )
         baseline_mean, candidate_mean = fmean(base_values), fmean(trial_values)
         gain = candidate_mean - baseline_mean
-        case_regressions = [max(0.0, base - trial) for base, trial in zip(base_values, trial_values, strict=True)]
+        case_regressions = [
+            max(0.0, base - trial)
+            for base, trial in zip(base_values, trial_values, strict=True)
+        ]
         maximum_regression = max(case_regressions, default=0.0)
         if gain < minimum_gain or maximum_regression > max_case_regression:
             raise ValueError("candidate did not pass the promotion quality gate")
 
-        with self._lock:
-            try:
-                self._connection.execute("BEGIN IMMEDIATE")
-                candidate = self._connection.execute(
-                    "SELECT task_type, status, parent_id, version FROM strategies WHERE strategy_id = ?",
-                    (candidate_id,),
-                ).fetchone()
-                if candidate is None:
-                    raise KeyError(f"unknown strategy: {candidate_id}")
-                if candidate["status"] != "candidate":
-                    raise ValueError("only a candidate strategy can be promoted")
-                baseline = self._connection.execute(
-                    "SELECT task_type, status, version FROM strategies WHERE strategy_id = ?",
-                    (baseline_id,),
-                ).fetchone()
-                if baseline is None:
-                    raise KeyError(f"unknown baseline strategy: {baseline_id}")
-                if baseline["status"] != "active":
-                    raise ValueError("evaluation baseline must remain active")
-                if baseline["task_type"] != candidate["task_type"]:
-                    raise ValueError("baseline and candidate task_type must match")
-                if baseline_id == candidate_id:
-                    raise ValueError("candidate cannot be its own baseline")
-                if candidate["parent_id"] != baseline_id:
-                    raise ValueError("candidate lineage does not match the evaluated baseline")
-                if int(candidate["version"]) <= int(baseline["version"]):
-                    raise ValueError("candidate version must be greater than the evaluated baseline")
-                self._connection.execute(
-                    "UPDATE strategies SET status = 'active' WHERE strategy_id = ? AND status = 'candidate'",
-                    (candidate_id,),
-                )
-                self.record_event(
-                    "strategy-status-changed",
-                    candidate["task_type"],
-                    {"strategy_id": candidate_id, "from": "candidate", "to": "active"},
-                )
-                event_payload = {
-                    "candidate_id": candidate_id,
-                    "baseline_id": baseline_id,
-                    "candidate_score": candidate_mean,
-                    "baseline_score": baseline_mean,
-                    "gain": gain,
-                    "minimum_gain": minimum_gain,
-                    "max_case_regression": maximum_regression,
-                    "max_case_regression_limit": max_case_regression,
-                    "cases": len(case_ids),
-                    "case_results": [
-                        {
-                            "case_id": case_id,
-                            "baseline_score": base,
-                            "candidate_score": trial,
-                            "regression": regression,
-                        }
-                        for case_id, base, trial, regression in zip(
-                            case_ids, base_values, trial_values, case_regressions, strict=True
-                        )
-                    ],
-                    "accepted": True,
-                    "reason": f"promoted: mean gain {gain:.3f}, max case regression {maximum_regression:.3f}",
-                }
-                self.record_event("candidate-promoted", candidate["task_type"], event_payload)
-                self._connection.execute("COMMIT")
-            except Exception:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-                raise
+        with self.transaction():
+            candidate = self._connection.execute(
+                "SELECT task_type, status, parent_id, version FROM strategies WHERE strategy_id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if candidate is None:
+                raise KeyError(f"unknown strategy: {candidate_id}")
+            if candidate["status"] != "candidate":
+                raise ValueError("only a candidate strategy can be promoted")
+            baseline = self._connection.execute(
+                "SELECT task_type, status, version FROM strategies WHERE strategy_id = ?",
+                (baseline_id,),
+            ).fetchone()
+            if baseline is None:
+                raise KeyError(f"unknown baseline strategy: {baseline_id}")
+            if baseline["status"] != "active":
+                raise ValueError("evaluation baseline must remain active")
+            if baseline["task_type"] != candidate["task_type"]:
+                raise ValueError("baseline and candidate task_type must match")
+            if baseline_id == candidate_id:
+                raise ValueError("candidate cannot be its own baseline")
+            if candidate["parent_id"] != baseline_id:
+                raise ValueError("candidate lineage does not match the evaluated baseline")
+            if int(candidate["version"]) <= int(baseline["version"]):
+                raise ValueError("candidate version must be greater than the evaluated baseline")
+            self._connection.execute(
+                "UPDATE strategies SET status = 'active' WHERE strategy_id = ? AND status = 'candidate'",
+                (candidate_id,),
+            )
+            self.record_event(
+                "strategy-status-changed", candidate["task_type"],
+                {"strategy_id": candidate_id, "from": "candidate", "to": "active"},
+            )
+            self.record_event("candidate-promoted", candidate["task_type"], {
+                "candidate_id": candidate_id, "baseline_id": baseline_id,
+                "candidate_score": candidate_mean, "baseline_score": baseline_mean,
+                "gain": gain, "minimum_gain": minimum_gain,
+                "max_case_regression": maximum_regression,
+                "max_case_regression_limit": max_case_regression,
+                "cases": len(case_ids),
+                "case_results": [
+                    {"case_id": case_id, "baseline_score": base, "candidate_score": trial, "regression": regression}
+                    for case_id, base, trial, regression in zip(
+                        case_ids, base_values, trial_values, case_regressions, strict=True
+                    )
+                ],
+                "accepted": True,
+                "reason": f"promoted: mean gain {gain:.3f}, max case regression {maximum_regression:.3f}",
+            })
         return self.get_strategy(candidate_id)
-
     def disable_strategy_with_fallback(self, strategy_id: str) -> StoredStrategy:
         """Atomically disable an active strategy only when another active fallback remains."""
         if not isinstance(strategy_id, str) or not strategy_id:
             raise ValueError("strategy_id must be a non-empty string")
-        with self._lock:
-            try:
-                self._connection.execute("BEGIN IMMEDIATE")
-                row = self._connection.execute(
-                    "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
-                    (strategy_id,),
-                ).fetchone()
-                if row is None:
-                    raise KeyError(f"unknown strategy: {strategy_id}")
-                if row["status"] != "active":
-                    raise ValueError("only an active strategy can be rolled back")
-                remaining = self._connection.execute(
-                    "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
-                    (row["task_type"],),
-                ).fetchone()["n"]
-                if int(remaining) <= 1:
-                    raise ValueError("cannot disable the last active strategy; no safe fallback would remain")
-                self._connection.execute(
-                    "UPDATE strategies SET status = 'disabled' WHERE strategy_id = ? AND status = 'active'",
-                    (strategy_id,),
-                )
-                self.record_event(
-                    "strategy-status-changed", row["task_type"],
-                    {"strategy_id": strategy_id, "from": "active", "to": "disabled"},
-                )
-                self.record_event(
-                    "strategy-rollback", row["task_type"],
-                    {
-                        "disabled_strategy_id": strategy_id,
-                        "fallbacks": [
-                            item["strategy_id"] for item in self._connection.execute(
-                                "SELECT strategy_id FROM strategies WHERE task_type = ? AND status = 'active' ORDER BY strategy_id",
-                                (row["task_type"],),
-                            ).fetchall()
-                        ],
-                    },
-                )
-                self._connection.execute("COMMIT")
-            except Exception:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-                raise
+        with self.transaction():
+            row = self._connection.execute(
+                "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
+                (strategy_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown strategy: {strategy_id}")
+            if row["status"] != "active":
+                raise ValueError("only an active strategy can be rolled back")
+            remaining = self._connection.execute(
+                "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
+                (row["task_type"],),
+            ).fetchone()["n"]
+            if int(remaining) <= 1:
+                raise ValueError("cannot disable the last active strategy; no safe fallback would remain")
+            self._connection.execute(
+                "UPDATE strategies SET status = 'disabled' WHERE strategy_id = ? AND status = 'active'",
+                (strategy_id,),
+            )
+            self.record_event(
+                "strategy-status-changed", row["task_type"],
+                {"strategy_id": strategy_id, "from": "active", "to": "disabled"},
+            )
+            self.record_event("strategy-rollback", row["task_type"], {
+                "disabled_strategy_id": strategy_id,
+                "fallbacks": [
+                    item["strategy_id"] for item in self._connection.execute(
+                        "SELECT strategy_id FROM strategies WHERE task_type = ? AND status = 'active' ORDER BY strategy_id",
+                        (row["task_type"],),
+                    ).fetchall()
+                ],
+            })
         return self.get_strategy(strategy_id)
-
     def record_outcome(
-        self,
-        task_type: str,
-        strategy_id: str,
-        score: float,
-        success: bool,
+        self, task_type: str, strategy_id: str, score: float, success: bool,
         metadata: dict[str, Any] | None = None,
     ) -> int:
         validate_identifier(task_type, "task_type")
@@ -445,37 +418,27 @@ class Store:
         if metadata is not None and not isinstance(metadata, dict):
             raise ValueError("metadata must be a dictionary or None")
         metadata_json = _json_dump(metadata or {})
-        with self._lock:
-            try:
-                # Serialize status-check and observation insertion. A strategy
-                # cannot be disabled between validation and recording feedback.
-                self._connection.execute("BEGIN IMMEDIATE")
-                strategy = self._connection.execute(
-                    "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
-                    (strategy_id,),
-                ).fetchone()
-                if strategy is None:
-                    raise KeyError(f"unknown strategy: {strategy_id}")
-                if strategy["task_type"] != task_type:
-                    raise ValueError("task_type does not match the strategy")
-                if strategy["status"] != "active":
-                    raise ValueError("only active strategies may influence live adaptation")
-                cursor = self._connection.execute(
-                    """
-                    INSERT INTO observations
-                    (task_type, strategy_id, score, success, metadata_json, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (task_type, strategy_id, score, int(success), metadata_json, _utc_now()),
-                )
-                observation_id = int(cursor.lastrowid)
-                self._connection.execute("COMMIT")
-            except Exception:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-                raise
+        with self.transaction():
+            strategy = self._connection.execute(
+                "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
+                (strategy_id,),
+            ).fetchone()
+            if strategy is None:
+                raise KeyError(f"unknown strategy: {strategy_id}")
+            if strategy["task_type"] != task_type:
+                raise ValueError("task_type does not match the strategy")
+            if strategy["status"] != "active":
+                raise ValueError("only active strategies may influence live adaptation")
+            cursor = self._connection.execute(
+                """
+                INSERT INTO observations
+                (task_type, strategy_id, score, success, metadata_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (task_type, strategy_id, score, int(success), metadata_json, _utc_now()),
+            )
+            observation_id = int(cursor.lastrowid)
         return observation_id
-
     def stats(self, task_type: str) -> dict[str, dict[str, float]]:
         with self._lock:
             rows = self._connection.execute(
@@ -553,12 +516,11 @@ class Store:
                 raise ValueError("task_type does not match the strategy")
         if metadata is not None and not isinstance(metadata, dict):
             raise ValueError("metadata must be a dictionary or None")
-        tags_json = _json_dump(normalized_tags)
-        metadata_json = _json_dump(metadata or {})
-        created_at = _utc_now()
-        with self._lock:
-            try:
-                self._connection.execute("BEGIN IMMEDIATE")
+        tags_json, metadata_json, created_at = (
+            _json_dump(normalized_tags), _json_dump(metadata or {}), _utc_now()
+        )
+        try:
+            with self.transaction():
                 self._connection.execute(
                     """
                     INSERT INTO episodes
@@ -577,21 +539,13 @@ class Store:
                                  "score": score, "success": success, "tags": normalized_tags}),
                      created_at),
                 )
-                self._connection.execute("COMMIT")
-            except sqlite3.IntegrityError as exc:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-                raise ValueError(f"episode could not be inserted: {exc}") from exc
-            except Exception:
-                if self._connection.in_transaction:
-                    self._connection.execute("ROLLBACK")
-                raise
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"episode could not be inserted: {exc}") from exc
         return {
             "episode_id": episode_id, "task_type": task_type, "summary": summary.strip(),
             "tags": normalized_tags, "strategy_id": strategy_id, "score": score,
             "success": success, "metadata": json.loads(metadata_json), "created_at": created_at,
         }
-
     def search_episodes(
         self, query: str = "", *, task_type: str | None = None,
         tags: list[str] | tuple[str, ...] = (), limit: int = 10,
