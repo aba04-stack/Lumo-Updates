@@ -234,3 +234,36 @@ def test_evidence_review_rejects_malformed_urls_and_groups_publishers_consistent
     assert review.status == "single_publisher_unverified"
     assert len(review.extracted_claims) == 1
     assert review.extracted_claims[0]["publisher_domain"] == "example.co.uk"
+
+
+def test_review_rejects_unbounded_document_iterable_without_consuming_it_forever() -> None:
+    consumed = 0
+
+    def endless_documents():
+        nonlocal consumed
+        while True:
+            consumed += 1
+            yield {
+                "title": "Test",
+                "url": "https://source.example/article",
+                "content": "A sentence long enough to look like a claim.",
+            }
+
+    with pytest.raises(ValueError, match="at most 100 documents"):
+        ReasoningEngine().review_documents("test query", endless_documents())
+    assert consumed == 101
+
+
+def test_reasoner_bounds_fact_and_rule_iterables_before_materializing() -> None:
+    engine = ReasoningEngine()
+    facts_seen = 0
+
+    def endless_facts():
+        nonlocal facts_seen
+        while True:
+            facts_seen += 1
+            yield KnowledgeFact("sensor", str(facts_seen), "test", 0.5)
+
+    with pytest.raises(ValueError, match="at most 1000 facts"):
+        engine.forward_chain(endless_facts(), [])
+    assert facts_seen == 1001
