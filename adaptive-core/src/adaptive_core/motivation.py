@@ -324,25 +324,24 @@ class MotivationEngine:
         normalized_criteria = list(dict.fromkeys(normalized_criteria))
         normalized_refs = list(dict.fromkeys(normalized_refs))
         verification_id = "verification-" + uuid.uuid4().hex
-        self.store.record_event("motivation-goal-verification-recorded", "motivation", {
-            "goal_id": goal_id,
-            "verification_id": verification_id,
-            "method": method,
-            "reviewer": reviewer.strip(),
-            "criteria": normalized_criteria,
-            "evidence_refs": normalized_refs,
-            "claim_verified": False,
-            "reviewer_authenticated": False,
-            "meaning": "An auditable review record, not independent proof of truth.",
-        })
-        # A failure between these two writes leaves the goal uncompleted; replay
-        # ignores a completion without a matching verification record.
-        self.store.record_event("motivation-goal-status", "motivation", {
-            "goal_id": goal_id,
-            "from": goal.status,
-            "status": "completed",
-            "verification_id": verification_id,
-        })
+        with self.store.transaction():
+            self.store.record_event("motivation-goal-verification-recorded", "motivation", {
+                "goal_id": goal_id,
+                "verification_id": verification_id,
+                "method": method,
+                "reviewer": reviewer.strip(),
+                "criteria": normalized_criteria,
+                "evidence_refs": normalized_refs,
+                "claim_verified": False,
+                "reviewer_authenticated": False,
+                "meaning": "An auditable review record, not independent proof of truth.",
+            })
+            self.store.record_event("motivation-goal-status", "motivation", {
+                "goal_id": goal_id,
+                "from": goal.status,
+                "status": "completed",
+                "verification_id": verification_id,
+            })
         return next(item for item in self.goals() if item.goal_id == goal_id)
 
     def set_goal_status(self, goal_id: str, status: str) -> MotivationalGoal:
