@@ -258,3 +258,39 @@ def test_invalid_feedback_for_unknown_strategy_has_no_persisted_episode() -> Non
             )
         assert store.total_observations("reasoning") == 0
         assert store.search_episodes(task_type="reasoning") == []
+
+
+def test_outcome_learning_rolls_back_all_persistent_changes_on_late_failure() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        baseline = core.create_baseline("atomic-feedback")
+        cognitive = CognitiveSystem(core)
+        affect_before = cognitive.affect.state()
+        drive_before = cognitive.motivation.state()
+        model_before = cognitive.affect.model_snapshot()
+
+        def fail_late(**kwargs):
+            raise RuntimeError("simulated late motivation failure")
+
+        cognitive.motivation.update_outcome = fail_late
+        with pytest.raises(RuntimeError, match="simulated late motivation failure"):
+            cognitive.learn_from_outcome(
+                task_type="atomic-feedback",
+                strategy_id=baseline.config.strategy_id,
+                summary="A feedback update with a simulated late failure.",
+                score=0.3,
+                success=False,
+                metadata={"uncertainty": 0.8, "novelty": 0.3},
+            )
+
+        assert store.total_observations("atomic-feedback") == 0
+        assert store.search_episodes(task_type="atomic-feedback") == []
+        assert cognitive.affect.state() == affect_before
+        assert cognitive.motivation.state() == drive_before
+        assert cognitive.affect.model_snapshot() == model_before
+        event_types = {event["event_type"] for event in store.recent_events(limit=100)}
+        assert "episode-recorded" not in event_types
+        assert "affect-state-updated" not in event_types
+        assert "affect-model-trained" not in event_types
+        assert "motivation-state-updated" not in event_types
+        assert cognitive.workspace.snapshot() == []
