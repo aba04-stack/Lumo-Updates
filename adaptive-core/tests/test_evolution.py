@@ -19,8 +19,12 @@ def build_cases() -> list[EvaluationCase]:
 
 
 def make_candidate(core: AdaptiveCore, parent_id: str, strategy_id: str = "candidate-v1"):
+    parent = core.store.get_strategy(parent_id)
     return core.register_candidate(
-        StrategyConfig(strategy_id, "math", "Candidate configuration, not executable code."),
+        StrategyConfig(
+            strategy_id, "math", "Candidate configuration, not executable code.",
+            version=parent.config.version + 1,
+        ),
         parent_id=parent_id,
     )
 
