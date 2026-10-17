@@ -196,13 +196,18 @@ class ClaimVerificationEngine:
         raw_confidence = raw.get("confidence")
         raw_summary = raw.get("summary")
         raw_urls = raw.get("evidence_urls")
+        confidence_value: float | None = None
+        if not isinstance(raw_confidence, bool) and isinstance(raw_confidence, (int, float)):
+            try:
+                candidate_confidence = float(raw_confidence)
+            except (OverflowError, ValueError, TypeError):
+                candidate_confidence = float("nan")
+            if math.isfinite(candidate_confidence) and 0.0 <= candidate_confidence <= 1.0:
+                confidence_value = candidate_confidence
         if (
             not isinstance(raw_status, str)
             or raw_status not in _ALLOWED_ASSESSMENTS
-            or isinstance(raw_confidence, bool)
-            or not isinstance(raw_confidence, (int, float))
-            or not math.isfinite(float(raw_confidence))
-            or not 0.0 <= float(raw_confidence) <= 1.0
+            or confidence_value is None
             or not isinstance(raw_summary, str)
             or not raw_summary.strip()
             or len(raw_summary) > 1_500
@@ -218,7 +223,7 @@ class ClaimVerificationEngine:
                 reason="invalid_response_schema",
             )
 
-        confidence = validate_score(float(raw_confidence))
+        confidence = validate_score(confidence_value)
         evidence_by_url = {item["url"]: item for item in eligible}
         if any(url not in evidence_by_url for url in raw_urls):
             return self._result(
