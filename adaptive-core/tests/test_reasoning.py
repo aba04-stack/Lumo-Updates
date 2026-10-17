@@ -1,5 +1,6 @@
-from itertools import permutations
 from __future__ import annotations
+
+from itertools import permutations
 import pytest
 from adaptive_core import InferenceRule, KnowledgeFact, ReasoningEngine
 
