@@ -33,6 +33,11 @@ def test_autonomous_loop_runs_bounded_cycle_and_keeps_caveats() -> None:
         assert result["affect_model_samples"] == 1
         assert result["results"][0]["goal_status"] == "needs_verification"
         assert result["results"][0]["claims_independently_verified"] is False
+        assert step["claim_extraction_method"] == "sentence_heuristic_v1"
+        assert step["claim_candidates"]
+        assert all(claim["independently_verified"] is False for claim in step["claim_candidates"])
+        assert step["potential_contradictions"] == []
+        assert step["contradiction_proxy"] == 0.0
         assert result["motivation"]["uncertainty_reduction"] > 0.45
         assert len(result["goals_needing_verification"]) == 1
         assert result["goals_needing_verification"][0]["title"] == "обучение"
@@ -99,3 +104,39 @@ def test_irrelevant_documents_score_below_lexically_relevant_documents() -> None
     assert relevant["relevance_coverage_proxy"] > irrelevant["relevance_coverage_proxy"]
     assert relevant["retrieval_utility"] > irrelevant["retrieval_utility"]
     assert irrelevant["claims_independently_verified"] is False
+
+
+def test_autonomous_loop_surfaces_but_does_not_overstate_contradiction_candidates() -> None:
+    class ContradictoryInternet(FakeInternet):
+        def __init__(self) -> None:
+            self.documents = [
+                {
+                    "title": "Affirmative",
+                    "url": "https://ru.wikipedia.org/wiki/Claim_A",
+                    "content": "Earth is round.",
+                    "content_sha256": "c" * 64,
+                    "trust_level": "unverified_external_source",
+                    "language": "en",
+                },
+                {
+                    "title": "Negated",
+                    "url": "https://ru.wikipedia.org/wiki/Claim_B",
+                    "content": "Earth is not round.",
+                    "content_sha256": "d" * 64,
+                    "trust_level": "unverified_external_source",
+                    "language": "en",
+                },
+            ]
+
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        core.create_baseline("autonomous-research")
+        loop = CognitiveSystem(core, internet=ContradictoryInternet()).autonomous_learning_loop(
+            topics=["Earth round"], pages_per_topic=2
+        )
+        result = loop.run(max_steps=1, page_budget=2)["results"][0]
+
+    assert len(result["claim_candidates"]) == 2
+    assert len(result["potential_contradictions"]) == 1
+    assert result["contradiction_proxy"] > 0.0
+    assert all(item["independently_verified"] is False for item in result["potential_contradictions"])
