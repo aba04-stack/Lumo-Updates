@@ -89,17 +89,24 @@ class MotivationEngine:
         return self.store.recent_events(limit=10_000)
 
     def state(self) -> DriveState:
-        event = self.store.latest_event("motivation-state-updated")
-        if event is None:
-            return DriveState()
-        payload = event["payload"].get("state", {})
-        try:
-            values = {name: validate_score(payload[name]) for name in _DRIVES}
-            updated_at = payload.get("updated_at", event["created_at"])
-            if isinstance(updated_at, str):
-                return DriveState(**values, updated_at=updated_at)
-        except (KeyError, ValueError):
-            pass
+        # Recover the newest valid state in this stream, ignoring malformed
+        # records rather than silently resetting a previously learned state.
+        for event in self.store.events_of_types(
+            ["motivation-state-updated"], limit=1_000, newest_first=True
+        ):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            state_payload = payload.get("state")
+            if not isinstance(state_payload, dict):
+                continue
+            try:
+                values = {name: validate_score(state_payload[name]) for name in _DRIVES}
+                updated_at = state_payload.get("updated_at", event["created_at"])
+                if isinstance(updated_at, str):
+                    return DriveState(**values, updated_at=updated_at)
+            except (KeyError, TypeError, ValueError):
+                continue
         return DriveState()
 
     def update_outcome(
