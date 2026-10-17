@@ -11,6 +11,19 @@ from .source_safety import registered_publisher_domain, safe_https_source_url
 def terms(text: str) -> set[str]:
     return {word.casefold() for word in re.findall(r"[^\W_]+", text, flags=re.UNICODE) if len(word) > 2}
 
+def _collect_limited(values: Iterable[Any], maximum: int, label: str) -> list[Any]:
+    """Materialize a bounded iterable without first consuming it unboundedly."""
+    collected: list[Any] = []
+    try:
+        iterator = iter(values)
+    except TypeError as exc:
+        raise TypeError(f"{label} must be iterable") from exc
+    for value in iterator:
+        if len(collected) >= maximum:
+            raise ValueError(f"at most {maximum} {label} may be supplied")
+        collected.append(value)
+    return collected
+
 @dataclass(frozen=True, slots=True)
 class KnowledgeFact:
     predicate: str
@@ -206,9 +219,8 @@ class ReasoningEngine:
     def forward_chain(self, facts: Iterable[KnowledgeFact], rules: Iterable[InferenceRule], *, max_steps: int = 100) -> InferenceResult:
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 1000:
             raise ValueError("max_steps must be an integer from 1 to 1,000")
-        current, rule_list = list(facts), list(rules)
-        if len(current) > 1000 or len(rule_list) > 500:
-            raise ValueError("reasoning input exceeds configured limits")
+        current = _collect_limited(facts, 1000, "facts")
+        rule_list = _collect_limited(rules, 500, "rules")
         if any(not isinstance(fact, KnowledgeFact) for fact in current):
             raise TypeError("facts must contain KnowledgeFact objects")
         if any(not isinstance(rule, InferenceRule) for rule in rule_list):
@@ -253,9 +265,7 @@ class ReasoningEngine:
         """
         if isinstance(max_claims, bool) or not isinstance(max_claims, int) or not 1 <= max_claims <= 200:
             raise ValueError("max_claims must be an integer from 1 to 200")
-        items = list(documents)
-        if len(items) > 100:
-            raise ValueError("at most 100 documents may be processed")
+        items = _collect_limited(documents, 100, "documents")
         claims: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
         for item in items:
@@ -322,9 +332,10 @@ class ReasoningEngine:
         """
         if isinstance(max_findings, bool) or not isinstance(max_findings, int) or not 1 <= max_findings <= 100:
             raise ValueError("max_findings must be an integer from 1 to 100")
-        items = [claim for claim in claims if isinstance(claim, dict)]
-        if len(items) > 200:
-            raise ValueError("at most 200 claims may be compared")
+        items = [
+            claim for claim in _collect_limited(claims, 200, "claims")
+            if isinstance(claim, dict)
+        ]
         findings: list[dict[str, Any]] = []
         seen_pairs: set[tuple[str, str, str]] = set()
         for index, first in enumerate(items):
@@ -424,9 +435,7 @@ class ReasoningEngine:
             raise ValueError("query must contain 1-2,000 characters")
         if isinstance(max_excerpts, bool) or not isinstance(max_excerpts, int) or not 1 <= max_excerpts <= 20:
             raise ValueError("max_excerpts must be an integer from 1 to 20")
-        items = list(documents)
-        if len(items) > 100:
-            raise ValueError("at most 100 documents may be reviewed")
+        items = _collect_limited(documents, 100, "documents")
         query_terms, excerpts, source_urls, publishers = terms(query), [], [], set()
         for item in items:
             if not isinstance(item, dict):
@@ -471,7 +480,9 @@ class ReasoningEngine:
         excluded_set = {entry.casefold().strip() for entry in excluded if isinstance(entry, str)}
         stopwords = {"что","это","как","для","при","или","так","его","ее","они","она","который","которая","которые","также","может","можно","более","менее","this","that","with","from","have","into","about","their","there","which","what","when","where","while","were","been","being","such","the","and","for","are","but","not","you","your","its","use","used"}
         candidates: dict[str, int] = {}
-        for document in documents:
+        for document_index, document in enumerate(documents):
+            if document_index >= 100:
+                raise ValueError("at most 100 documents may be processed")
             if not isinstance(document, dict):
                 continue
             title, content = document.get("title", ""), document.get("content", "")
