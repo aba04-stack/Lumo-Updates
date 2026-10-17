@@ -271,3 +271,13 @@ def test_overflowing_confidence_fails_closed_without_raising_overflow_error() ->
     result = ClaimVerificationEngine(backend).assess_claim(CLAIM, EVIDENCE)
     assert result["status"] == "needs_human_review"
     assert result["reason"] == "invalid_response_schema"
+
+
+def test_invalid_explicit_claim_source_url_fails_closed() -> None:
+    backend = StubBackend()
+    invalid_claim = {**CLAIM, "source_url": "https://user@example.org/claim"}
+    result = ClaimVerificationEngine(backend).assess_claim(invalid_claim, EVIDENCE)
+
+    assert result["status"] == "needs_human_review"
+    assert result["reason"] == "invalid_claim_source_url"
+    assert backend.calls == 0
