@@ -141,3 +141,10 @@ def test_outer_rollback_cancels_nested_strategy_and_audit_event() -> None:
             store.get_strategy("nested-strategy")
         assert store.list_strategies("nested-tx") == []
         assert store.events_for_task("nested-tx", limit=20) == []
+
+
+def test_event_payload_size_limit_rejects_oversized_metadata() -> None:
+    with Store(":memory:") as store:
+        with pytest.raises(ValueError, match="1,000,000-byte limit"):
+            store.record_event("oversized", "test", {"large": "x" * 1_000_001})
+        assert store.events_for_task("test", limit=10) == []
