@@ -31,9 +31,14 @@ def test_autonomous_loop_runs_bounded_cycle_and_keeps_caveats() -> None:
         assert "Keyword overlap" in step["caveat"]
         assert result["affect"]["curiosity"] >= 0.0
         assert result["affect_model_samples"] == 1
+        assert result["results"][0]["goal_status"] == "completed"
+        assert result["motivation"]["uncertainty_reduction"] > 0.45
+        assert any(goal["status"] == "active" for goal in result["active_goals"]) is False
         assert store.search_episodes(task_type="autonomous-research")
         assert any(event["event_type"] == "autonomous-research-step" for event in store.recent_events())
         assert any(event["event_type"] == "affect-model-trained" for event in store.recent_events())
+        assert any(event["event_type"] == "motivation-state-updated" for event in store.recent_events())
+        assert any(event["event_type"] == "motivation-goal-status" for event in store.recent_events())
 
 def test_autonomous_loop_rejects_unbounded_run_requests() -> None:
     with Store(":memory:") as store:
