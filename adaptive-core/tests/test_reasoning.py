@@ -267,3 +267,31 @@ def test_reasoner_bounds_fact_and_rule_iterables_before_materializing() -> None:
     with pytest.raises(ValueError, match="at most 1000 facts"):
         engine.forward_chain(endless_facts(), [])
     assert facts_seen == 1001
+
+
+def test_malformed_claim_records_are_ignored_by_contradiction_detector() -> None:
+    engine = ReasoningEngine()
+    malformed = [
+        {
+            "claim_id": "valid-ish",
+            "source_url": "https://a.example/claim",
+            "text": "The claim has a sufficiently long text.",
+            "comparison_terms": ["claim", "sufficiently", "long"],
+            "polarity": "affirmed",
+        },
+        {
+            "claim_id": "bad-polarity",
+            "source_url": "https://b.example/claim",
+            "text": "The claim has a sufficiently long text.",
+            "comparison_terms": ["claim", "sufficiently", "long"],
+            "polarity": [],
+        },
+        {
+            "claim_id": "bad-terms",
+            "source_url": "https://c.example/claim",
+            "text": "The claim has a sufficiently long text.",
+            "comparison_terms": [["unhashable"]],
+            "polarity": "negated",
+        },
+    ]
+    assert engine.detect_potential_contradictions(malformed) == ()
