@@ -118,6 +118,15 @@ class ClaimVerificationEngine:
             raise ValueError("claim.text must contain 1-2,000 characters")
         claim_id_raw = claim.get("claim_id", "")
         claim_id = str(claim_id_raw)[:120]
+        raw_source_url = claim.get("source_url")
+        source_url = _safe_https_url(raw_source_url)
+        if raw_source_url not in (None, "") and source_url is None:
+            return self._result(
+                claim_id=claim_id,
+                status="needs_human_review",
+                summary="The claim's source URL is not a valid public HTTPS source.",
+                reason="invalid_claim_source_url",
+            )
 
         if isinstance(evidence, (str, bytes, Mapping)):
             raise TypeError("evidence must be an iterable of document mappings")
@@ -126,7 +135,6 @@ class ClaimVerificationEngine:
             if len(items) >= 100:
                 raise ValueError("at most 100 evidence items may be supplied")
             items.append(item)
-        source_url = _safe_https_url(claim.get("source_url"))
         source_publisher = _publisher_domain(source_url) if source_url else None
 
         eligible: list[dict[str, Any]] = []
