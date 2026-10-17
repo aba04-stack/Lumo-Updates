@@ -259,3 +259,15 @@ def test_verifier_rejects_unbounded_evidence_iterable() -> None:
     with pytest.raises(ValueError, match="at most 100 evidence items"):
         ClaimVerificationEngine(StubBackend()).assess_claim(CLAIM, endless_evidence())
     assert consumed == 101
+
+
+def test_overflowing_confidence_fails_closed_without_raising_overflow_error() -> None:
+    backend = StubBackend({
+        "status": "supports_claim",
+        "confidence": 10 ** 10_000,
+        "summary": "An absurdly large confidence value.",
+        "evidence_urls": [EVIDENCE[0]["url"], EVIDENCE[1]["url"]],
+    })
+    result = ClaimVerificationEngine(backend).assess_claim(CLAIM, EVIDENCE)
+    assert result["status"] == "needs_human_review"
+    assert result["reason"] == "invalid_response_schema"
