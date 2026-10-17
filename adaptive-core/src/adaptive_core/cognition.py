@@ -9,6 +9,7 @@ from .episodic_memory import EpisodicMemory
 from .evolution import Evaluator, EvolutionManager, Proposer
 from .internet_learning import WikipediaLearner
 from .models import EvaluationCase, StrategyConfig, validate_identifier
+from .motivation import DriveState, MotivationEngine
 from .reasoning import EvidenceReview, ReasoningEngine
 from .self_model import SelfModel, SelfModelReport
 from .workspace import GlobalWorkspace, WorkspaceSignal
@@ -21,6 +22,7 @@ class CognitiveSnapshot:
     self_model: SelfModelReport
     affect: AffectState
     web_documents: tuple[dict[str, Any], ...] = ()
+    motivation: DriveState = DriveState()
 
 class CognitiveSystem:
     def __init__(self, core: AdaptiveCore, *, workspace_capacity: int = 32,
@@ -32,6 +34,7 @@ class CognitiveSystem:
         self.self_model = SelfModel(core)
         self.evolution = evolution or EvolutionManager(core)
         self.affect = AffectEngine(self.store)
+        self.motivation = MotivationEngine(self.store)
         self.reasoner = ReasoningEngine()
         self.internet = internet or WikipediaLearner()
 
@@ -83,7 +86,18 @@ class CognitiveSystem:
             content=f"{task_type}: {'success' if success else 'failure'}, score={score:.3f}; {summary[:1500]}",
             priority=0.8 if not success else 0.6, confidence=0.9,
         )
-        self.affect.appraise(succeeded=success, progress=score)
+        signals = metadata or {}
+        uncertainty = signals.get("uncertainty", 0.0)
+        contradiction = signals.get("contradiction", 0.0)
+        novelty = signals.get("novelty", 0.0)
+        self.affect.appraise(
+            succeeded=success, progress=score, uncertainty=uncertainty,
+            contradiction=contradiction, novelty=novelty,
+        )
+        self.motivation.update_outcome(
+            succeeded=success, progress=score, uncertainty=uncertainty,
+            contradiction=contradiction, novelty=novelty,
+        )
         return episode
 
     def reflect(self, task_type: str, *, query: str = "",
@@ -96,6 +110,7 @@ class CognitiveSystem:
             self_model=self.self_model.report(task_type),
             affect=self.affect.state(),
             web_documents=tuple(self.internet.recall(web_query, limit=web_limit) if web_query else ()),
+            motivation=self.motivation.state(),
         )
 
     def propose_module_revision(self, module_name: str,
