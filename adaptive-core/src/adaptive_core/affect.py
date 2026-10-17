@@ -206,7 +206,7 @@ class AffectEngine:
             raise ValueError("reward must be a finite number in [-1, 1]")
         reward = float(reward)
         model = self._load_model()
-        predicted = sum(model["reward_weights"][feature] * normalized[feature] for feature in _FEATURES)
+        predicted = max(-1.0, min(1.0, sum(model["reward_weights"][feature] * normalized[feature] for feature in _FEATURES)))
         error = max(-1.0, min(1.0, reward - predicted))
         rate = self.learning_rate
         reward_weights = dict(model["reward_weights"])
