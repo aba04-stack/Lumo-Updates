@@ -212,3 +212,17 @@ class FakeInternet:
 
     def recall(self, query: str = "", *, limit: int = 5):
         return []
+
+
+def test_out_of_range_confidence_is_rejected_without_crashing() -> None:
+    backend = StubBackend({
+        "status": "supports_claim",
+        "confidence": 1.7,
+        "summary": "Invalid confidence should never be trusted.",
+        "evidence_urls": [EVIDENCE[0]["url"], EVIDENCE[1]["url"]],
+    })
+    result = ClaimVerificationEngine(backend).assess_claim(CLAIM, EVIDENCE)
+
+    assert result["status"] == "needs_human_review"
+    assert result["reason"] == "invalid_response_schema"
+    assert result["claim_verified"] is False
