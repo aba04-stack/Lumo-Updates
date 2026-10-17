@@ -3,6 +3,7 @@ from .affect import AffectEngine, AffectState
 from .autonomy import AutonomousLearningLoop
 from .cognition import CognitiveSnapshot, CognitiveSystem
 from .core import AdaptiveCore, NoActiveStrategyError
+from .claim_verification import ClaimAssessmentBackend, ClaimVerificationEngine
 from .episodic_memory import EpisodicMemory
 from .evolution import EvolutionManager
 from .internet_learning import InternetLearningError, WebKnowledgeStore, WikipediaLearner
@@ -16,7 +17,8 @@ from .workspace import GlobalWorkspace, WorkspaceSignal
 
 __all__ = [
     "AffectEngine", "AffectState", "AdaptiveCore", "AdaptiveRunner", "Assessment",
-    "AutonomousLearningLoop", "CognitiveSnapshot", "CognitiveSystem", "DriveState",
+    "AutonomousLearningLoop", "ClaimAssessmentBackend", "ClaimVerificationEngine",
+    "CognitiveSnapshot", "CognitiveSystem", "DriveState",
     "EvaluationCase", "EpisodicMemory", "EvolutionManager", "EvidenceReview",
     "GlobalWorkspace", "InferenceResult", "InferenceRule", "InternetLearningError",
     "KnowledgeFact", "MotivationEngine", "MotivationalGoal", "NoActiveStrategyError",
