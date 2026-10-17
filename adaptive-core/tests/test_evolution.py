@@ -126,3 +126,37 @@ def test_candidate_with_invalid_score_cannot_promote() -> None:
         )
         assert not decision.accepted
         assert store.get_strategy(candidate.config.strategy_id).status == "candidate"
+
+
+def test_proposal_feedback_keeps_task_history_despite_unrelated_event_noise() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        baseline = core.create_baseline("math")
+        store.record_event("domain-failure-recorded", "math", {"reason": "wrong answer"})
+        for index in range(250):
+            store.record_event("unrelated-noise", "another-task", {"index": index})
+        captured = []
+        manager = EvolutionManager(core)
+        cases = build_cases()
+
+        decision = manager.propose_and_evaluate(
+            "math",
+            cases,
+            proposer=lambda current, feedback: (
+                captured.append(feedback) or StrategyConfig(
+                    "candidate-after-noise",
+                    "math",
+                    "Check evidence and arithmetic before responding.",
+                    version=current.version + 1,
+                )
+            ),
+            evaluator=lambda strategy, case: (
+                0.9 if strategy.strategy_id == "candidate-after-noise" else 0.6
+            ),
+        )
+
+        assert decision.accepted
+        assert captured
+        assert "domain-failure-recorded" in {
+            event["event_type"] for event in captured[0]["recent_event_types"]
+        }
