@@ -226,3 +226,16 @@ def test_out_of_range_confidence_is_rejected_without_crashing() -> None:
     assert result["status"] == "needs_human_review"
     assert result["reason"] == "invalid_response_schema"
     assert result["claim_verified"] is False
+
+
+def test_non_string_status_fails_closed_without_type_error() -> None:
+    backend = StubBackend({
+        "status": ["supports_claim"],
+        "confidence": 0.9,
+        "summary": "Malformed status value.",
+        "evidence_urls": [EVIDENCE[0]["url"], EVIDENCE[1]["url"]],
+    })
+    result = ClaimVerificationEngine(backend).assess_claim(CLAIM, EVIDENCE)
+
+    assert result["status"] == "needs_human_review"
+    assert result["reason"] == "invalid_response_schema"
