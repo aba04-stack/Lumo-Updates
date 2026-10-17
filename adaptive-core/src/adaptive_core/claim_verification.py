@@ -228,6 +228,7 @@ class ClaimVerificationEngine:
             or isinstance(raw_confidence, bool)
             or not isinstance(raw_confidence, (int, float))
             or not math.isfinite(float(raw_confidence))
+            or not 0.0 <= float(raw_confidence) <= 1.0
             or not isinstance(raw_summary, str)
             or not raw_summary.strip()
             or len(raw_summary) > 1_500
