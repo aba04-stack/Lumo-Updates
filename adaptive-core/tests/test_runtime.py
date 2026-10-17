@@ -65,3 +65,32 @@ def test_executor_failure_is_logged_without_fake_score() -> None:
 
         assert store.total_observations("coding") == 0
         assert store.recent_events()[0]["event_type"] == "task-execution-failed"
+
+
+def test_success_score_rolls_back_if_completion_event_fails() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        baseline = core.create_baseline("atomic-runtime")
+        runner = AdaptiveRunner(core)
+        original_record_event = store.record_event
+
+        def fail_completion_event(event_type, task_type, payload):
+            if event_type == "task-completed":
+                raise RuntimeError("completion audit unavailable")
+            return original_record_event(event_type, task_type, payload)
+
+        store.record_event = fail_completion_event
+        with pytest.raises(RuntimeError, match="completion audit unavailable"):
+            runner.run(
+                "atomic-runtime",
+                "test payload",
+                executor=lambda strategy, payload: "ok",
+                grader=lambda strategy, payload, output: Assessment(0.9, True),
+            )
+
+        assert store.total_observations("atomic-runtime") == 0
+        assert not any(
+            event["event_type"] == "task-completed"
+            for event in store.events_for_task("atomic-runtime", limit=20)
+        )
+        assert store.get_strategy(baseline.config.strategy_id).status == "active"
