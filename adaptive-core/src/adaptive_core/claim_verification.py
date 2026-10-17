@@ -119,9 +119,13 @@ class ClaimVerificationEngine:
         claim_id_raw = claim.get("claim_id", "")
         claim_id = str(claim_id_raw)[:120]
 
-        items = list(evidence)
-        if len(items) > 100:
-            raise ValueError("at most 100 evidence items may be supplied")
+        if isinstance(evidence, (str, bytes, Mapping)):
+            raise TypeError("evidence must be an iterable of document mappings")
+        items: list[Mapping[str, Any]] = []
+        for item in evidence:
+            if len(items) >= 100:
+                raise ValueError("at most 100 evidence items may be supplied")
+            items.append(item)
         source_url = _safe_https_url(claim.get("source_url"))
         source_publisher = _publisher_domain(source_url) if source_url else None
 
