@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+import pytest
+
 from adaptive_core import AdaptiveCore, ClaimVerificationEngine, CognitiveSystem, Store
 
 
