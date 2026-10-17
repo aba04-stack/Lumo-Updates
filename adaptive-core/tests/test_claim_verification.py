@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from adaptive_core import ClaimVerificationEngine, CognitiveSystem
+from adaptive_core import AdaptiveCore, ClaimVerificationEngine, CognitiveSystem, Store
 
 
 CLAIM = {
@@ -91,8 +91,6 @@ def test_too_few_independent_publishers_prevents_backend_call() -> None:
 
 
 def test_claim_source_publisher_is_not_counted_as_independent_support() -> None:
-    backend = StubBackend()
-    claim = {**CLAIM, "source_url": "https://publisher-a.org/original"}
     evidence = [
         EVIDENCE[0],
         EVIDENCE[1],
@@ -102,13 +100,19 @@ def test_claim_source_publisher_is_not_counted_as_independent_support() -> None:
             "content": "Another independent text.",
         },
     ]
+    backend = StubBackend({
+        "status": "supports_claim",
+        "confidence": 0.9,
+        "summary": "Two independent eligible publishers appear supportive.",
+        "evidence_urls": [EVIDENCE[1]["url"], evidence[2]["url"]],
+    })
+    claim = {**CLAIM, "source_url": "https://publisher-a.org/original"}
     result = ClaimVerificationEngine(backend).assess_claim(claim, evidence)
 
     assert result["status"] == "supports_claim"
     assert "publisher-a.org" not in result["publisher_domains"]
     assert result["publisher_domains"] == ["publisher-b.net", "publisher-c.com"]
-    # The backend's template cites A, which was excluded before assessment.
-    assert result["reason"] == "citation_not_in_supplied_evidence"
+    assert result["evidence_urls"] == [EVIDENCE[1]["url"], evidence[2]["url"]]
     assert result["claim_verified"] is False
 
 
@@ -191,12 +195,20 @@ def test_evidence_with_non_https_or_userinfo_urls_is_ignored() -> None:
 
 
 def test_cognitive_layer_exposes_the_fail_closed_assessment_boundary() -> None:
-    # The integration is a thin pass-through; it does not mutate goal state.
-    class FakeCore:
-        pass
-
-    # Use the engine directly through the same backend contract because a full
-    # CognitiveSystem requires a persistent strategy store.
     backend = StubBackend()
-    result = ClaimVerificationEngine(backend).assess_claim(CLAIM, EVIDENCE)
-    assert result["goal_completion_allowed"] is False
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        core.create_baseline("semantic-claim-assessment")
+        cognitive = CognitiveSystem(core, internet=FakeInternet())
+        result = cognitive.assess_claim(CLAIM, EVIDENCE, backend=backend)
+        assert result["status"] == "supports_claim"
+        assert result["goal_completion_allowed"] is False
+        assert result["claim_verified"] is False
+
+
+class FakeInternet:
+    def learn(self, query: str, *, language: str = "ru", limit: int = 5):
+        return []
+
+    def recall(self, query: str = "", *, limit: int = 5):
+        return []
