@@ -64,7 +64,7 @@ def registered_publisher_domain(url: str) -> str:
     """
     if safe_https_source_url(url) is None:
         raise ValueError("url must be a syntactically safe public HTTPS source URL")
-    host = urlparse(url).hostname.lower().rstrip(".")
+    host = urlparse(url).hostname.lower().rstrip(".").encode("idna").decode("ascii")
     labels = host.split(".")
     last_two = ".".join(labels[-2:])
     if len(labels) >= 3 and last_two in _COMPOUND_PUBLIC_SUFFIXES:
