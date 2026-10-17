@@ -155,17 +155,19 @@ class MotivationEngine:
         return "goal-" + hashlib.sha256(raw).hexdigest()[:24]
 
     def goals(self, *, status: str | None = None) -> list[MotivationalGoal]:
-        if status is not None and status not in _GOAL_STATUSES:
+        if status is not None and (not isinstance(status, str) or status not in _GOAL_STATUSES):
             raise ValueError(f"unsupported goal status: {status}")
         records: dict[str, dict[str, Any]] = {}
         events = self.store.events_of_types(
-            ["motivation-goal-created", "motivation-goal-status"],
+            ["motivation-goal-created", "motivation-goal-status", "motivation-goal-verification-recorded"],
             limit=None,
             newest_first=False,
         )
         verification_records: dict[str, str] = {}
         for event in events:
             payload = event["payload"]
+            if not isinstance(payload, dict):
+                continue
             kind = event["event_type"]
             if kind == "motivation-goal-created":
                 goal_id = payload.get("goal_id")
@@ -186,16 +188,27 @@ class MotivationEngine:
                 if (
                     isinstance(goal_id, str)
                     and goal_id in records
-                    and isinstance(verification_id, str)
-                    and payload.get("method") in {"manual_review", "deterministic_test", "formal_proof"}
+                    and isinstance(verification_id, str) and 1 <= len(verification_id) <= 120
+                    and isinstance(payload.get("method"), str)
+                    and payload["method"] in {"manual_review", "deterministic_test", "formal_proof"}
                     and isinstance(payload.get("reviewer"), str)
-                    and isinstance(payload.get("criteria"), list) and payload["criteria"]
-                    and isinstance(payload.get("evidence_refs"), list) and payload["evidence_refs"]
+                    and 1 <= len(payload["reviewer"].strip()) <= 128
+                    and isinstance(payload.get("criteria"), list)
+                    and 1 <= len(payload["criteria"]) <= 20
+                    and all(isinstance(value, str) and 1 <= len(value.strip()) <= 300 for value in payload["criteria"])
+                    and isinstance(payload.get("evidence_refs"), list)
+                    and 1 <= len(payload["evidence_refs"]) <= 20
+                    and all(isinstance(value, str) and 1 <= len(value.strip()) <= 2_000 for value in payload["evidence_refs"])
                 ):
                     verification_records[verification_id] = goal_id
             elif kind == "motivation-goal-status":
                 goal_id, requested = payload.get("goal_id"), payload.get("status")
-                if goal_id not in records or requested not in _GOAL_STATUSES:
+                if (
+                    not isinstance(goal_id, str)
+                    or goal_id not in records
+                    or not isinstance(requested, str)
+                    or requested not in _GOAL_STATUSES
+                ):
                     continue
                 current = records[goal_id]["status"]
                 if requested == current:
@@ -246,7 +259,7 @@ class MotivationEngine:
     ) -> MotivationalGoal:
         if not isinstance(title, str) or not title.strip() or len(title.strip()) > 180:
             raise ValueError("goal title must contain 1-180 characters")
-        if drive not in _DRIVES:
+        if not isinstance(drive, str) or drive not in _DRIVES:
             raise ValueError(f"unsupported drive: {drive}")
         priority = validate_score(priority)
         if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > 300:
@@ -282,7 +295,7 @@ class MotivationEngine:
             raise KeyError(f"unknown goal: {goal_id}")
         if goal.status != "needs_verification":
             raise ValueError("goal must be in needs_verification before completion")
-        if method not in {"manual_review", "deterministic_test", "formal_proof"}:
+        if not isinstance(method, str) or method not in {"manual_review", "deterministic_test", "formal_proof"}:
             raise ValueError("method must be manual_review, deterministic_test, or formal_proof")
         if not isinstance(reviewer, str) or not reviewer.strip() or len(reviewer.strip()) > 128:
             raise ValueError("reviewer must contain 1-128 characters")
@@ -328,7 +341,7 @@ class MotivationEngine:
     def set_goal_status(self, goal_id: str, status: str) -> MotivationalGoal:
         if not isinstance(goal_id, str) or not goal_id:
             raise ValueError("goal_id must be non-empty")
-        if status not in _GOAL_STATUSES:
+        if not isinstance(status, str) or status not in _GOAL_STATUSES:
             raise ValueError(f"unsupported goal status: {status}")
         if status == "completed":
             existing_completed = next((goal for goal in self.goals() if goal.goal_id == goal_id), None)
