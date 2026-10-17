@@ -68,6 +68,15 @@ _CLAIM_STOPWORDS = {
     "его", "ее", "они", "она", "мы", "вы", "быть", "был", "была", "были",
     "есть", "на", "из", "к", "по", "и", "а", "но", "же", "ли", "этот",
     "эта", "эти", "который", "которая", "которые", "может", "могут",
+    "km", "miles", "mile", "kilometers", "kilometer", "kilometres", "kilometre",
+    "meters", "meter", "metres", "metre", "kg", "kilograms", "kilogram",
+    "grams", "gram", "milligrams", "milligram", "percent", "percentage",
+    "hours", "hour", "minutes", "minute", "seconds", "second", "days", "day",
+    "years", "year", "million", "millions", "billion", "billions", "thousand",
+    "километров", "километр", "километры", "метров", "метр", "метры",
+    "граммов", "грамм", "килограммов", "килограмм", "процентов", "процент",
+    "часов", "часа", "час", "минут", "минута", "минуты", "секунд", "секунда", "секунды",
+    "дней", "день", "дня", "лет", "год", "года", "миллионов", "миллион", "миллиарда", "миллиард",
 }
 _NEGATION_PATTERNS = (
     r"\bnot\b", r"\bno\b", r"\bnever\b", r"\bwithout\b", r"\bcannot\b",
