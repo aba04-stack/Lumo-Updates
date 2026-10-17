@@ -21,6 +21,7 @@ _ALLOWED_ASSESSMENTS = {
 }
 _LIMITATION = (
     "A model-generated assessment is not an independently verified fact. "
+    "Different domains do not prove independent ownership or reporting. "
     "Check cited passages and context; this result cannot complete a goal."
 )
 
@@ -53,9 +54,10 @@ def _publisher_domain(url: str) -> str:
 class ClaimVerificationEngine:
     """Validate and constrain a provider's semantic assessment.
 
-    The engine requires evidence from at least two publisher domains other than
-    the claim's own publisher before accepting a positive/negative model verdict.
-    It never sets claim_verified or goal_completion_allowed to True.
+    The engine requires evidence from at least two distinct registered-domain
+    approximations other than the claim's own publisher before accepting a
+    positive/negative model verdict. Domain differences do not prove independent
+    ownership or reporting. It never verifies a claim or completes a goal.
     """
 
     def __init__(
@@ -181,7 +183,16 @@ class ClaimVerificationEngine:
             )
 
         try:
-            raw = self.backend.assess_claim(dict(claim), tuple(eligible))
+            # Give the backend only the fields needed for claim assessment.
+            # Arbitrary caller-supplied metadata can contain secrets or instructions
+            # that are irrelevant to verification.
+            backend_claim: dict[str, Any] = {
+                "claim_id": claim_id,
+                "text": claim_text,
+            }
+            if source_url is not None:
+                backend_claim["source_url"] = source_url
+            raw = self.backend.assess_claim(backend_claim, tuple(eligible))
         except Exception as exc:  # fail closed; never mark a claim verified on provider failure
             return self._result(
                 claim_id=claim_id,
