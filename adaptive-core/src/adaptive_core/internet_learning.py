@@ -264,6 +264,8 @@ class WikipediaLearner:
                 "utf8": "1",
             },
         )
+        if not isinstance(result, dict):
+            raise InternetLearningError("Wikipedia returned an unexpected search-result structure")
         query_result = result.get("query")
         if not isinstance(query_result, dict) or not isinstance(query_result.get("search"), list):
             raise InternetLearningError("Wikipedia returned an unexpected search-result structure")
@@ -298,10 +300,12 @@ class WikipediaLearner:
                 "utf8": "1",
             },
         )
+        if not isinstance(details, dict):
+            raise InternetLearningError("Wikipedia returned an unexpected page-detail structure")
         details_query = details.get("query")
         if not isinstance(details_query, dict):
             raise InternetLearningError("Wikipedia returned an unexpected page-detail structure")
-        pages = details_query.get("pages", {})
+        pages = details_query.get("pages")
         if isinstance(pages, dict):
             page_items = list(pages.values())
         elif isinstance(pages, list):
