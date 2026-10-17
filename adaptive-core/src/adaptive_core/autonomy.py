@@ -127,7 +127,6 @@ class AutonomousLearningLoop:
             documents = self.cognitive.learn_from_internet(query, language=self.language, limit=page_limit)
         except InternetLearningError as exc:
             error = str(exc)[:240]
-            self.cognitive.affect.update("task-failed", intensity=0.7)
         review = self.reasoner.review_documents(query, documents)
         discovered_terms: set[str] = set()
         for document in documents:
@@ -150,12 +149,16 @@ class AutonomousLearningLoop:
             "evidence_status": review.status, "retrieval_utility": information_gain,
             "discovered_terms": sorted(discovered_terms)[:30], "new_terms": sorted(new_terms)[:30], "suggested_topics": next_topics, "error": error,
         })
-        if documents:
-            self.cognitive.affect.update("information-gain", intensity=information_gain)
-            if review.status != "no_evidence":
-                self.cognitive.affect.update("uncertainty-detected", intensity=0.35)
-        elif error is None:
-            self.cognitive.affect.update("search-empty", intensity=0.7)
+        # This feedback measures retrieval usefulness/new information only. It is
+        # not a score for factual truth, source quality, or correctness of claims.
+        self.cognitive.affect.appraise(
+            succeeded=bool(documents) and error is None,
+            progress=information_gain,
+            uncertainty=0.90 if not documents else 0.70,
+            contradiction=0.0,
+            novelty=min(1.0, len(new_terms) / 10.0),
+            feedback=information_gain if documents else -0.5,
+        )
         return {
             "status": status, "topic": query, "documents_found": len(documents),
             "source_urls": list(review.source_urls), "evidence_status": review.status,
@@ -183,4 +186,5 @@ class AutonomousLearningLoop:
             "steps_completed": len(results), "pages_requested_budget": page_budget,
             "pages_budget_remaining": remaining, "documents_found": sum(item["documents_found"] for item in results),
             "results": results, "affect": asdict(self.cognitive.affect.state()),
+            "affect_model_samples": self.cognitive.affect.model_snapshot()["samples"],
         }
