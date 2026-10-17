@@ -239,3 +239,21 @@ def test_non_string_status_fails_closed_without_type_error() -> None:
 
     assert result["status"] == "needs_human_review"
     assert result["reason"] == "invalid_response_schema"
+
+
+def test_verifier_rejects_unbounded_evidence_iterable() -> None:
+    consumed = 0
+
+    def endless_evidence():
+        nonlocal consumed
+        while True:
+            consumed += 1
+            yield {
+                "title": f"Source {consumed}",
+                "url": f"https://publisher-{consumed}.example/article",
+                "content": "Some evidence to assess.",
+            }
+
+    with pytest.raises(ValueError, match="at most 100 evidence items"):
+        ClaimVerificationEngine(StubBackend()).assess_claim(CLAIM, endless_evidence())
+    assert consumed == 101
