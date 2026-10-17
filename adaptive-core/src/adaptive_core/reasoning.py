@@ -324,14 +324,30 @@ def _numeric_mentions_are_disjoint(first: Any, second: Any) -> bool:
     )
 
 def _same_numeric_multiset(first: Any, second: Any) -> bool:
-    """Do not call reordered representations of the same numeric set a conflict."""
+    """Treat reordered numeric lists as equivalent only without distinct local contexts."""
     first_numbers = first.get("numeric_mentions", [])
     second_numbers = second.get("numeric_mentions", [])
     if not isinstance(first_numbers, list) or not isinstance(second_numbers, list):
         return False
     left = [item for item in first_numbers if isinstance(item, dict)]
     right = [item for item in second_numbers if isinstance(item, dict)]
-    if not left or len(left) != len(right):
+    if len(left) < 2 or len(left) != len(right):
+        return False
+
+    left_contexts = [
+        _numeric_context_signature(first.get("text"), item) for item in left
+    ]
+    right_contexts = [
+        _numeric_context_signature(second.get("text"), item) for item in right
+    ]
+    if (
+        any(context is None for context in left_contexts + right_contexts)
+        or len(set(left_contexts)) != 1
+        or len(set(right_contexts)) != 1
+    ):
+        # Different local predicates can attach different meanings to the values;
+        # those contexts must remain comparable even when the overall number set
+        # happens to be the same.
         return False
 
     def key(item: dict[str, Any]) -> tuple[str, str, str]:
