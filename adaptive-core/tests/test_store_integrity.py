@@ -95,3 +95,34 @@ def test_feedback_is_not_recorded_for_disabled_strategies() -> None:
             core.record_result(first.config.strategy_id, 0.9, True)
         assert store.total_observations("feedback-integrity") == 0
         assert store.get_strategy(second.config.strategy_id).status == "active"
+
+
+def test_nested_savepoint_rolls_back_only_inner_writes() -> None:
+    with Store(":memory:") as store:
+        with store.transaction():
+            store.record_event("outer-before", "tx-test", {"phase": 1})
+            with pytest.raises(RuntimeError, match="inner failure"):
+                with store.transaction():
+                    store.record_event("inner-should-rollback", "tx-test", {"phase": 2})
+                    raise RuntimeError("inner failure")
+            store.record_event("outer-after", "tx-test", {"phase": 3})
+
+        events = store.events_for_task("tx-test", limit=20, newest_first=False)
+        types = [event["event_type"] for event in events]
+        assert types == ["outer-before", "outer-after"]
+
+
+def test_outer_rollback_cancels_nested_strategy_and_audit_event() -> None:
+    with Store(":memory:") as store:
+        with pytest.raises(RuntimeError, match="abort outer transaction"):
+            with store.transaction():
+                store.create_strategy(
+                    StrategyConfig("nested-strategy", "nested-tx", "Should roll back."),
+                    status="active",
+                )
+                raise RuntimeError("abort outer transaction")
+
+        with pytest.raises(KeyError, match="nested-strategy"):
+            store.get_strategy("nested-strategy")
+        assert store.list_strategies("nested-tx") == []
+        assert store.events_for_task("nested-tx", limit=20) == []
