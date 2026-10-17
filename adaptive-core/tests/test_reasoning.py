@@ -42,3 +42,71 @@ def test_no_sources_is_explicitly_unknown() -> None:
     review = ReasoningEngine().review_documents("unknown topic", [])
     assert review.status == "no_evidence"
     assert review.source_urls == ()
+
+
+def test_sentence_claim_candidates_preserve_provenance_and_mark_uncertainty() -> None:
+    engine = ReasoningEngine()
+    docs = [
+        {
+            "title": "A source",
+            "url": "https://source-a.example/fact",
+            "content": "Earth is round.",
+            "fetched_at": "2026-10-17T10:00:00+00:00",
+            "content_sha256": "a" * 64,
+        },
+        {
+            "title": "Another source",
+            "url": "https://source-b.example/fact",
+            "content": "Earth is not round.",
+            "fetched_at": "2026-10-17T10:01:00+00:00",
+            "content_sha256": "b" * 64,
+        },
+    ]
+
+    claims = engine.extract_claims(docs)
+    assert len(claims) == 2
+    assert claims[0]["source_url"] == docs[0]["url"]
+    assert claims[0]["observed_at"] == docs[0]["fetched_at"]
+    assert claims[0]["source_hash"] == docs[0]["content_sha256"]
+    assert claims[0]["extraction_method"] == "sentence_heuristic_v1"
+    assert claims[0]["independently_verified"] is False
+    assert claims[0]["extraction_confidence"] < 0.5
+
+    findings = engine.detect_potential_contradictions(claims)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["kind"] == "opposite_polarity_lexical_match"
+    assert finding["status"] == "candidate_requires_review"
+    assert finding["independently_verified"] is False
+    assert {claim["source_url"] for claim in finding["claims"]} == {
+        docs[0]["url"], docs[1]["url"]
+    }
+
+
+def test_document_review_includes_claims_and_candidate_contradictions() -> None:
+    review = ReasoningEngine().review_documents("Earth round", [
+        {
+            "title": "Affirmative",
+            "url": "https://one.example/claim",
+            "content": "Earth is round.",
+        },
+        {
+            "title": "Negated",
+            "url": "https://two.example/claim",
+            "content": "Earth is not round.",
+        },
+    ])
+    assert len(review.extracted_claims) == 2
+    assert len(review.potential_contradictions) == 1
+    assert review.potential_contradictions[0]["status"] == "candidate_requires_review"
+
+
+def test_contradiction_candidate_requires_distinct_urls_opposite_polarity_and_overlap() -> None:
+    engine = ReasoningEngine()
+    claims = engine.extract_claims([
+        {"title": "A", "url": "https://one.example/a", "content": "Earth is round."},
+        {"title": "B", "url": "https://one.example/a", "content": "Earth is not round."},
+        {"title": "C", "url": "https://two.example/c", "content": "Earth is blue."},
+    ])
+    findings = engine.detect_potential_contradictions(claims)
+    assert findings == ()
