@@ -31,9 +31,13 @@ def test_autonomous_loop_runs_bounded_cycle_and_keeps_caveats() -> None:
         assert "Keyword overlap" in step["caveat"]
         assert result["affect"]["curiosity"] >= 0.0
         assert result["affect_model_samples"] == 1
-        assert result["results"][0]["goal_status"] == "completed"
+        assert result["results"][0]["goal_status"] == "needs_verification"
+        assert result["results"][0]["claims_independently_verified"] is False
         assert result["motivation"]["uncertainty_reduction"] > 0.45
-        assert any(goal["status"] == "active" for goal in result["active_goals"]) is False
+        assert len(result["goals_needing_verification"]) == 1
+        assert result["goals_needing_verification"][0]["title"] == "обучение"
+        # Finding a page must not be treated as answering or verifying the goal.
+        assert loop._choose_topic(set()) != "обучение"
         assert store.search_episodes(task_type="autonomous-research")
         assert any(event["event_type"] == "autonomous-research-step" for event in store.recent_events())
         assert any(event["event_type"] == "affect-model-trained" for event in store.recent_events())
@@ -63,3 +67,35 @@ def test_curiosity_can_prefer_a_newly_discovered_topic() -> None:
         loop.queue_topic("related-topic", priority=0.35, reason="derived_from_new_material")
         # Under baseline affect, curiosity makes a newly discovered topic win.
         assert loop._choose_topic(set()) == "related-topic"
+
+def test_irrelevant_documents_score_below_lexically_relevant_documents() -> None:
+    class IrrelevantInternet(FakeInternet):
+        def __init__(self) -> None:
+            self.documents = [{
+                "title": "Музыкальные инструменты",
+                "url": "https://ru.wikipedia.org/wiki/Музыкальные_инструменты",
+                "content": "Скрипка и виолончель относятся к струнным музыкальным инструментам.",
+                "content_sha256": "b" * 64,
+                "trust_level": "unverified_external_source",
+                "language": "ru",
+            }]
+
+    with Store(":memory:") as relevant_store:
+        core = AdaptiveCore(relevant_store)
+        core.create_baseline("autonomous-research")
+        relevant_loop = CognitiveSystem(core, internet=FakeInternet()).autonomous_learning_loop(
+            topics=["обучение"], pages_per_topic=1
+        )
+        relevant = relevant_loop.run(max_steps=1, page_budget=1)["results"][0]
+
+    with Store(":memory:") as irrelevant_store:
+        core = AdaptiveCore(irrelevant_store)
+        core.create_baseline("autonomous-research")
+        irrelevant_loop = CognitiveSystem(core, internet=IrrelevantInternet()).autonomous_learning_loop(
+            topics=["обучение"], pages_per_topic=1
+        )
+        irrelevant = irrelevant_loop.run(max_steps=1, page_budget=1)["results"][0]
+
+    assert relevant["relevance_coverage_proxy"] > irrelevant["relevance_coverage_proxy"]
+    assert relevant["retrieval_utility"] > irrelevant["retrieval_utility"]
+    assert irrelevant["claims_independently_verified"] is False
