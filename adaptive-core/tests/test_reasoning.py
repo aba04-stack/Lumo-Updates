@@ -110,3 +110,97 @@ def test_contradiction_candidate_requires_distinct_urls_opposite_polarity_and_ov
     ])
     findings = engine.detect_potential_contradictions(claims)
     assert findings == ()
+
+
+def test_same_unit_numeric_difference_becomes_review_candidate() -> None:
+    engine = ReasoningEngine()
+    claims = engine.extract_claims([
+        {
+            "title": "Source one",
+            "url": "https://one.example/moons",
+            "content": "Mars has 2 moons.",
+        },
+        {
+            "title": "Source two",
+            "url": "https://two.example/moons",
+            "content": "Mars has 3 moons.",
+        },
+    ])
+    assert [claim["numeric_mentions"][0]["value"] for claim in claims] == ["2", "3"]
+    findings = engine.detect_potential_contradictions(claims)
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "same_unit_numeric_mismatch"
+    assert findings[0]["status"] == "candidate_requires_review"
+    assert findings[0]["numeric_differences"][0]["first_value"] == "2"
+    assert findings[0]["numeric_differences"][0]["second_value"] == "3"
+    assert findings[0]["independently_verified"] is False
+
+
+def test_equivalent_numeric_values_do_not_create_conflict() -> None:
+    engine = ReasoningEngine()
+    claims = engine.extract_claims([
+        {
+            "title": "Source one",
+            "url": "https://one.example/height",
+            "content": "The tower is 3 km tall.",
+        },
+        {
+            "title": "Source two",
+            "url": "https://two.example/height",
+            "content": "The tower is 3 kilometers tall.",
+        },
+    ])
+    assert claims[0]["numeric_mentions"][0]["unit"] == "km"
+    assert claims[1]["numeric_mentions"][0]["unit"] == "km"
+    assert engine.detect_potential_contradictions(claims) == ()
+
+
+def test_different_units_are_not_compared_without_conversion() -> None:
+    engine = ReasoningEngine()
+    claims = engine.extract_claims([
+        {
+            "title": "Source one",
+            "url": "https://one.example/route",
+            "content": "The route is 3 km long.",
+        },
+        {
+            "title": "Source two",
+            "url": "https://two.example/route",
+            "content": "The route is 3 miles long.",
+        },
+    ])
+    assert claims[0]["numeric_mentions"][0]["unit"] == "km"
+    assert claims[1]["numeric_mentions"][0]["unit"] == "mile"
+    assert engine.detect_potential_contradictions(claims) == ()
+
+
+def test_year_mismatch_is_flagged_but_remains_unverified() -> None:
+    engine = ReasoningEngine()
+    claims = engine.extract_claims([
+        {
+            "title": "Source one",
+            "url": "https://one.example/bridge",
+            "content": "The bridge opened in 1998.",
+        },
+        {
+            "title": "Source two",
+            "url": "https://two.example/bridge",
+            "content": "The bridge opened in 2001.",
+        },
+    ])
+    findings = engine.detect_potential_contradictions(claims)
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "year_value_mismatch"
+    assert findings[0]["independently_verified"] is False
+
+
+def test_not_only_is_not_classified_as_negation() -> None:
+    claims = ReasoningEngine().extract_claims([
+        {
+            "title": "Source one",
+            "url": "https://one.example/learning",
+            "content": "Learning is not only useful but also powerful.",
+        }
+    ])
+    assert len(claims) == 1
+    assert claims[0]["polarity"] == "affirmed"
