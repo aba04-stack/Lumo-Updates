@@ -186,6 +186,15 @@ CASES = (
         "expected_candidate": True, "expected_kind": "same_unit_numeric_mismatch",
     },
     {
+        "name": "Russian feminine count words",
+        "documents": [
+            {"title": "A", "url": "https://one.example/platforms-ru", "content": "На станции две платформы."},
+            {"title": "B", "url": "https://two.example/platforms-ru", "content": "На станции три платформы."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "same_unit_numeric_mismatch",
+    },
+    {
         "name": "same unordered numeric list in different order",
         "documents": [
             {"title": "A", "url": "https://one.example/list", "content": "The list contains 2 and 3."},
@@ -260,17 +269,17 @@ def _metrics(rows):
 def test_expanded_claim_review_benchmark() -> None:
     rows = _evaluate_cases()
     metrics = _metrics(rows)
-    assert len(CASES) == 22
-    # These are precision/recall values over 19 hand-labelled, in-scope synthetic
+    assert len(CASES) == 23
+    # These are precision/recall values over 20 hand-labelled, in-scope synthetic
     # cases only. Three unscored cases remain visible as policy/coverage limits
     # and are not hidden inside the headline metrics.
-    assert metrics["scored_cases"] == 19
+    assert metrics["scored_cases"] == 20
     assert metrics["false_positives"] == 0, metrics
     assert metrics["false_negatives"] == 0, metrics
     assert metrics["precision"] == 1.0
     assert metrics["recall"] == 1.0
     assert metrics["known_limitation_cases"] == 3
-    assert metrics["true_positives"] == 11
+    assert metrics["true_positives"] == 12
     assert metrics["true_negatives"] == 8
 
 
