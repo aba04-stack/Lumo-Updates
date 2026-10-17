@@ -8,7 +8,7 @@ from .core import AdaptiveCore
 from .episodic_memory import EpisodicMemory
 from .evolution import Evaluator, EvolutionManager, Proposer
 from .internet_learning import WikipediaLearner
-from .models import EvaluationCase, StrategyConfig, validate_identifier
+from .models import EvaluationCase, StrategyConfig, validate_identifier, validate_score
 from .motivation import DriveState, MotivationEngine
 from .reasoning import EvidenceReview, ReasoningEngine
 from .self_model import SelfModel, SelfModelReport
@@ -83,6 +83,31 @@ class CognitiveSystem:
     def learn_from_outcome(self, *, task_type: str, strategy_id: str, summary: str,
                            tags: list[str] | tuple[str, ...] = (), score: float, success: bool,
                            metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        # Validate the whole feedback item before recording the observation. In
+        # particular, invalid summaries/tags/appraisal signals must not leave a
+        # strategy score behind without the corresponding memory and feedback.
+        validate_identifier(task_type, "task_type")
+        validate_identifier(strategy_id, "strategy_id")
+        if not isinstance(summary, str) or not summary.strip() or len(summary) > 10_000:
+            raise ValueError("summary must contain 1-10,000 characters")
+        if isinstance(tags, str) or not isinstance(tags, (list, tuple)) or len(tags) > 32:
+            raise ValueError("tags must be a list/tuple of at most 32 strings")
+        if any(not isinstance(tag, str) or not tag.strip() or len(tag) > 64 for tag in tags):
+            raise ValueError("each tag must contain 1-64 characters")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dictionary or None")
+        score = validate_score(score)
+        if not isinstance(success, bool):
+            raise ValueError("success must be a bool")
+        signals = metadata or {}
+        uncertainty, contradiction, novelty = map(
+            validate_score,
+            (
+                signals.get("uncertainty", 0.0),
+                signals.get("contradiction", 0.0),
+                signals.get("novelty", 0.0),
+            ),
+        )
         self.core.record_result(strategy_id, score, success, metadata)
         episode = self.memory.remember(task_type, summary, tags=tags, strategy_id=strategy_id,
                                        score=score, success=success, metadata=metadata)
@@ -92,10 +117,6 @@ class CognitiveSystem:
             content=f"{task_type}: {'success' if success else 'failure'}, score={score:.3f}; {summary[:1500]}",
             priority=0.8 if not success else 0.6, confidence=0.9,
         )
-        signals = metadata or {}
-        uncertainty = signals.get("uncertainty", 0.0)
-        contradiction = signals.get("contradiction", 0.0)
-        novelty = signals.get("novelty", 0.0)
         self.affect.appraise(
             succeeded=success, progress=score, uncertainty=uncertainty,
             contradiction=contradiction, novelty=novelty,
