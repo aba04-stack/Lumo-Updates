@@ -295,3 +295,25 @@ def test_malformed_claim_records_are_ignored_by_contradiction_detector() -> None
         },
     ]
     assert engine.detect_potential_contradictions(malformed) == ()
+
+
+def test_inference_rule_freezes_mutable_pairs_and_rejects_malformed_values() -> None:
+    premises = [["sensor", "ready"]]
+    conclusion = ["device", "on"]
+    rule = InferenceRule("safe-rule", premises, conclusion, "A test rule.")
+    premises[0][0] = "changed"
+    conclusion[0] = "changed"
+    assert rule.premises == (("sensor", "ready"),)
+    assert rule.conclusion == ("device", "on")
+
+    with pytest.raises(ValueError, match="rule_id"):
+        InferenceRule([], (("sensor", "ready"),), ("device", "on"), "invalid id")
+    with pytest.raises(ValueError, match="predicate-value pair"):
+        InferenceRule("bad-premise", (("sensor",),), ("device", "on"), "invalid premise")
+    with pytest.raises(ValueError, match="predicate and value"):
+        InferenceRule("bad-conclusion", (("sensor", "ready"),), ["device"], "invalid conclusion")
+
+
+def test_knowledge_fact_rejects_malformed_provenance_type() -> None:
+    with pytest.raises(ValueError, match="inferred_by"):
+        KnowledgeFact("p", "v", "source", inferred_by=["not", "an", "id"])
