@@ -170,8 +170,8 @@ CASES = (
     {
         "name": "Russian direct negation",
         "documents": [
-            {"title": "A", "url": "https://one.example/earth-ru", "content": "Земля круглая."},
-            {"title": "B", "url": "https://two.example/earth-ru", "content": "Земля не круглая."},
+            {"title": "A", "url": "https://one.example/earth-ru", "content": "Планета Земля круглая."},
+            {"title": "B", "url": "https://two.example/earth-ru", "content": "Планета Земля не круглая."},
         ],
         "relation": "contradiction", "scorable": True,
         "expected_candidate": True, "expected_kind": "opposite_polarity_lexical_match",
