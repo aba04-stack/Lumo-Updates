@@ -58,8 +58,24 @@ def test_goal_lifecycle_is_persistent_and_idempotent(tmp_path) -> None:
         engine = MotivationEngine(reopened)
         needs_review = engine.set_goal_status(goal.goal_id, "needs_verification")
         assert needs_review.status == "needs_verification"
-        completed = engine.set_goal_status(goal.goal_id, "completed")
+        with pytest.raises(ValueError, match="complete_goal"):
+            engine.set_goal_status(goal.goal_id, "completed")
+        completed = engine.complete_goal(
+            goal.goal_id,
+            method="manual_review",
+            reviewer="test-reviewer",
+            criteria=["The question has an explicit answer."],
+            evidence_refs=["https://example.org/evidence"],
+        )
         assert completed.status == "completed"
+        verification_event = next(
+            event for event in reopened.events_of_types(
+                ["motivation-goal-verification-recorded"], limit=10, newest_first=True
+            ) if event["payload"]["goal_id"] == goal.goal_id
+        )
+        assert verification_event["payload"]["criteria"] == ["The question has an explicit answer."]
+        assert verification_event["payload"]["claim_verified"] is False
+        assert verification_event["payload"]["reviewer_authenticated"] is False
         with pytest.raises(ValueError, match="invalid goal transition"):
             engine.set_goal_status(goal.goal_id, "queued")
 
@@ -135,3 +151,46 @@ def test_current_state_and_goal_history_survive_long_unrelated_event_log(tmp_pat
         goals = cognitive.motivation.goals(status="needs_verification")
         assert len(goals) == 1
         assert goals[0].goal_id == goal.goal_id
+
+
+def test_goal_cannot_be_completed_by_a_bare_status_event() -> None:
+    with Store(":memory:") as store:
+        engine = MotivationEngine(store)
+        goal = engine.add_goal("Review a disputed claim", drive="uncertainty_reduction")
+        engine.set_goal_status(goal.goal_id, "active")
+        engine.set_goal_status(goal.goal_id, "needs_verification")
+        store.record_event("motivation-goal-status", "motivation", {
+            "goal_id": goal.goal_id,
+            "from": "needs_verification",
+            "status": "completed",
+            "verification_id": "not-a-real-verification-record",
+        })
+        restored = next(item for item in engine.goals() if item.goal_id == goal.goal_id)
+        assert restored.status == "needs_verification"
+
+
+def test_goal_completion_requires_nonempty_review_criteria_and_evidence() -> None:
+    with Store(":memory:") as store:
+        engine = MotivationEngine(store)
+        goal = engine.add_goal("Verify a source claim", drive="uncertainty_reduction")
+        engine.set_goal_status(goal.goal_id, "active")
+        engine.set_goal_status(goal.goal_id, "needs_verification")
+        with pytest.raises(ValueError, match="criteria"):
+            engine.complete_goal(
+                goal.goal_id, method="manual_review", reviewer="reviewer",
+                criteria=[], evidence_refs=["https://example.org/evidence"],
+            )
+        with pytest.raises(ValueError, match="evidence_refs"):
+            engine.complete_goal(
+                goal.goal_id, method="manual_review", reviewer="reviewer",
+                criteria=["Check the source"], evidence_refs=[],
+            )
+        assert next(item for item in engine.goals() if item.goal_id == goal.goal_id).status == "needs_verification"
+
+
+def test_invalid_status_types_fail_with_validation_error() -> None:
+    with Store(":memory:") as store:
+        engine = MotivationEngine(store)
+        goal = engine.add_goal("Validate API inputs", drive="competence")
+        with pytest.raises(ValueError, match="unsupported goal status"):
+            engine.set_goal_status(goal.goal_id, [])
