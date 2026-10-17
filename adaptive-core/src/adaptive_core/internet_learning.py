@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ class WebKnowledgeStore:
         if raw_path != ":memory:":
             Path(raw_path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
             raw_path = str(Path(raw_path).expanduser())
+        self._lock = threading.RLock()
         self._connection = sqlite3.connect(
             raw_path, timeout=10.0, check_same_thread=False, isolation_level=None
         )
@@ -75,7 +77,8 @@ class WebKnowledgeStore:
         )
 
     def close(self) -> None:
-        self._connection.close()
+        with self._lock:
+            self._connection.close()
 
     def __enter__(self) -> WebKnowledgeStore:
         return self
@@ -101,17 +104,24 @@ class WebKnowledgeStore:
     def save_document(
         self, *, title: str, url: str, language: str, query: str, content: str
     ) -> dict[str, Any]:
-        if language not in _ALLOWED_LANGUAGES:
+        if not isinstance(language, str) or language not in _ALLOWED_LANGUAGES:
             raise ValueError("unsupported Wikipedia language")
-        parsed = urlparse(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != f"{language}.wikipedia.org"
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port is not None
-        ):
-            raise ValueError("source URL must be HTTPS on the expected Wikipedia host")
+        if not isinstance(url, str) or not url or len(url) > 2_000:
+            raise ValueError("source URL must be a non-empty string of at most 2,000 characters")
+        try:
+            parsed = urlparse(url)
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != f"{language}.wikipedia.org"
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.port is not None
+            ):
+                raise ValueError("source URL must be HTTPS on the expected Wikipedia host")
+        except ValueError as exc:
+            if "source URL" in str(exc):
+                raise
+            raise ValueError("source URL must be HTTPS on the expected Wikipedia host") from exc
         if not isinstance(title, str) or not title.strip() or len(title) > 500:
             raise ValueError("title must contain 1-500 characters")
         if not isinstance(query, str) or not query.strip() or len(query) > 2_000:
@@ -125,24 +135,27 @@ class WebKnowledgeStore:
         normalized_content = content.strip()
         digest = hashlib.sha256(normalized_content.encode("utf-8")).hexdigest()
         fetched_at = _utc_now()
-        self._connection.execute(
-            """
-            INSERT INTO web_documents
-                (source_url, title, language, query_text, content, content_sha256, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_url) DO UPDATE SET
-                title=excluded.title,
-                language=excluded.language,
-                query_text=excluded.query_text,
-                content=excluded.content,
-                content_sha256=excluded.content_sha256,
-                fetched_at=excluded.fetched_at
-            """,
-            (url, title.strip(), language, query.strip(), normalized_content, digest, fetched_at),
-        )
-        row = self._connection.execute(
-            "SELECT * FROM web_documents WHERE source_url = ?", (url,)
-        ).fetchone()
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO web_documents
+                    (source_url, title, language, query_text, content, content_sha256, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_url) DO UPDATE SET
+                    title=excluded.title,
+                    language=excluded.language,
+                    query_text=excluded.query_text,
+                    content=excluded.content,
+                    content_sha256=excluded.content_sha256,
+                    fetched_at=excluded.fetched_at
+                """,
+                (url, title.strip(), language, query.strip(), normalized_content, digest, fetched_at),
+            )
+            row = self._connection.execute(
+                "SELECT * FROM web_documents WHERE source_url = ?", (url,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("saved web document could not be read back")
         return self._as_document(row)
 
     def search(self, query: str = "", *, limit: int = 5) -> list[dict[str, Any]]:
@@ -150,9 +163,10 @@ class WebKnowledgeStore:
             raise ValueError("query must be a string no longer than 2,000 characters")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
             raise ValueError("limit must be an integer from 1 to 20")
-        rows = self._connection.execute(
-            "SELECT * FROM web_documents ORDER BY fetched_at DESC LIMIT 1000"
-        ).fetchall()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM web_documents ORDER BY fetched_at DESC, rowid DESC LIMIT 1000"
+            ).fetchall()
         query_terms = _terms(query)
         ranked: list[tuple[float, int, dict[str, Any]]] = []
         for recency, row in enumerate(rows):
@@ -180,7 +194,11 @@ class WikipediaLearner:
         store: WebKnowledgeStore | None = None,
         timeout: float = 8.0,
     ) -> None:
-        if not 1.0 <= timeout <= 30.0:
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not 1.0 <= timeout <= 30.0
+        ):
             raise ValueError("timeout must be between 1 and 30 seconds")
         self.store = store or WebKnowledgeStore(db_path)
         self.timeout = timeout
@@ -189,6 +207,10 @@ class WikipediaLearner:
         self.store.close()
 
     def _request_json(self, language: str, params: dict[str, str]) -> dict[str, Any]:
+        if not isinstance(language, str) or language not in _ALLOWED_LANGUAGES:
+            raise ValueError("unsupported Wikipedia language")
+        if not isinstance(params, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in params.items()):
+            raise ValueError("params must be a dictionary of string keys and values")
         host = f"{language}.wikipedia.org"
         url = f"https://{host}/w/api.php?{urlencode(params)}"
         request = Request(
@@ -196,7 +218,7 @@ class WikipediaLearner:
             headers={
                 "Accept": "application/json",
                 "User-Agent": (
-                    "AdaptiveCoreLab/0.3 (educational research; "
+                    "AdaptiveCoreLab/0.10 (educational research; "
                     "https://github.com/aba04-stack/Lumo-Updates)"
                 ),
             },
@@ -226,7 +248,7 @@ class WikipediaLearner:
         if not isinstance(query, str) or not query.strip() or len(query) > 2_000:
             raise ValueError("query must contain 1-2,000 characters")
         query = query.strip()
-        if language not in _ALLOWED_LANGUAGES:
+        if not isinstance(language, str) or language not in _ALLOWED_LANGUAGES:
             raise ValueError(f"unsupported language: {language}")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
             raise ValueError("limit must be an integer from 1 to 10")
@@ -242,8 +264,23 @@ class WikipediaLearner:
                 "utf8": "1",
             },
         )
-        matches = result.get("query", {}).get("search", [])
-        page_ids = [str(item["pageid"]) for item in matches if "pageid" in item]
+        query_result = result.get("query")
+        if not isinstance(query_result, dict) or not isinstance(query_result.get("search"), list):
+            raise InternetLearningError("Wikipedia returned an unexpected search-result structure")
+        page_ids: list[str] = []
+        for item in query_result["search"]:
+            if not isinstance(item, dict):
+                continue
+            page_id = item.get("pageid")
+            if isinstance(page_id, bool) or not isinstance(page_id, (str, int)):
+                continue
+            normalized_id = str(page_id)
+            if not normalized_id.isdigit() or int(normalized_id) <= 0:
+                continue
+            if normalized_id not in page_ids:
+                page_ids.append(normalized_id)
+            if len(page_ids) >= limit:
+                break
         if not page_ids:
             return []
 
@@ -261,7 +298,10 @@ class WikipediaLearner:
                 "utf8": "1",
             },
         )
-        pages = details.get("query", {}).get("pages", {})
+        details_query = details.get("query")
+        if not isinstance(details_query, dict):
+            raise InternetLearningError("Wikipedia returned an unexpected page-detail structure")
+        pages = details_query.get("pages", {})
         if isinstance(pages, dict):
             page_items = list(pages.values())
         elif isinstance(pages, list):
