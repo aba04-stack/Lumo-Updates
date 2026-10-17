@@ -55,8 +55,10 @@ def test_goal_lifecycle_is_persistent_and_idempotent(tmp_path) -> None:
         restored = MotivationEngine(reopened).goals()[0]
         assert restored.goal_id == goal.goal_id
         assert restored.status == "deferred"
+        engine = MotivationEngine(reopened)
+        engine.set_goal_status(goal.goal_id, "completed")
         with pytest.raises(ValueError, match="invalid goal transition"):
-            MotivationEngine(reopened).set_goal_status(goal.goal_id, "queued")
+            engine.set_goal_status(goal.goal_id, "queued")
 
 
 def test_drive_pressure_can_change_which_goal_is_preferred() -> None:
