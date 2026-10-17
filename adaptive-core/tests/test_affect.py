@@ -96,3 +96,11 @@ def test_reward_predictor_remains_bounded_during_repeated_learning() -> None:
             result = affect.learn_from_outcome(features=features, reward=1.0)
             assert -1.0 <= result["predicted_reward"] <= 1.0
             assert -1.0 <= result["prediction_error"] <= 1.0
+
+
+def test_affect_state_ignores_malformed_latest_state_event() -> None:
+    with Store(":memory:") as store:
+        engine = AffectEngine(store)
+        expected = engine.update("knowledge-found", intensity=0.8)
+        store.record_event("affect-state-updated", "system", {"state": "corrupted"})
+        assert engine.state() == expected
