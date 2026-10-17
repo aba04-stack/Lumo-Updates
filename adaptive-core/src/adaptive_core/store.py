@@ -189,6 +189,15 @@ class Store:
         created_at = _utc_now()
         try:
             with self.transaction():
+                if status == "active":
+                    active_count = self._connection.execute(
+                        "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
+                        (config.task_type,),
+                    ).fetchone()["n"]
+                    if int(active_count) > 0:
+                        raise ValueError(
+                            "additional strategies must start as candidates and pass fixed-case evaluation"
+                        )
                 self._connection.execute(
                     """
                     INSERT INTO strategies
