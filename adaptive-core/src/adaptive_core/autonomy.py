@@ -184,6 +184,10 @@ class AutonomousLearningLoop:
         except InternetLearningError as exc:
             error = str(exc)[:240]
         review = self.reasoner.review_documents(query, documents)
+        claim_candidates = list(review.extracted_claims)
+        contradiction_candidates = list(review.potential_contradictions)
+        # These are cautious review-queue signals, not verified logical conflicts.
+        contradiction_signal = validate_score(min(1.0, len(contradiction_candidates) / 3.0))
         discovered_terms: set[str] = set()
         for document in documents:
             discovered_terms.update(terms(str(document.get("title", "")) + " " + str(document.get("content", ""))))
@@ -215,6 +219,10 @@ class AutonomousLearningLoop:
                 "novelty_proxy": novelty_signal, "retrieval_utility": retrieval_utility,
                 "retrieval_utility_is_truth_score": False,
                 "claims_independently_verified": False,
+                "claim_extraction_method": "sentence_heuristic_v1",
+                "claim_candidates": claim_candidates,
+                "potential_contradictions": contradiction_candidates,
+                "contradiction_proxy": contradiction_signal,
                 "suggested_topics": next_topics, "error": error,
             },
         )
@@ -226,7 +234,7 @@ class AutonomousLearningLoop:
             succeeded=succeeded,
             progress=retrieval_utility,
             uncertainty=uncertainty_signal,
-            contradiction=0.0,  # no autonomous claim-level contradiction detector yet
+            contradiction=contradiction_signal,
             novelty=novelty_signal,
             feedback=retrieval_utility if documents else -0.5,
         )
@@ -234,7 +242,7 @@ class AutonomousLearningLoop:
             succeeded=succeeded,
             progress=retrieval_utility,
             uncertainty=uncertainty_signal,
-            contradiction=0.0,
+            contradiction=contradiction_signal,
             novelty=novelty_signal,
         )
         # Completing a retrieval pass is not the same as verifying the research
@@ -262,6 +270,10 @@ class AutonomousLearningLoop:
             "epistemic_uncertainty_proxy": uncertainty_signal,
             "retrieval_utility": retrieval_utility, "retrieval_utility_is_truth_score": False,
             "claims_independently_verified": False, "error": error,
+            "claim_extraction_method": "sentence_heuristic_v1",
+            "claim_candidates": claim_candidates,
+            "potential_contradictions": contradiction_candidates,
+            "contradiction_proxy": contradiction_signal,
             "goal_id": goal.goal_id, "goal_status": goal.status, "drive": goal.drive,
             "drive_state": asdict(drive_state),
         }
