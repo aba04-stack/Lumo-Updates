@@ -120,6 +120,7 @@ def test_current_state_and_goal_history_survive_long_unrelated_event_log(tmp_pat
         goal = cognitive.motivation.add_goal(
             "Recheck a disputed claim", drive="uncertainty_reduction", priority=0.8
         )
+        cognitive.motivation.set_goal_status(goal.goal_id, "active")
         cognitive.motivation.set_goal_status(goal.goal_id, "needs_verification")
         affect_before = cognitive.affect.state()
         drive_before = cognitive.motivation.state()
