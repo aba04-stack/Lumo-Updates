@@ -1,5 +1,6 @@
 """Explainable symbolic inference and source-limited evidence review."""
 from __future__ import annotations
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -53,6 +54,41 @@ class InferenceResult:
     conflicts: tuple[str, ...]
     steps: int
 
+_CLAIM_STOPWORDS = {
+    # Function words are removed only for coarse lexical comparison; this is
+    # deliberately not a linguistic or semantic parser.
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "does", "do", "did", "has", "have", "had", "at", "of", "to", "in",
+    "on", "for", "and", "or", "but", "by", "with", "as", "from", "that",
+    "this", "it", "its", "can", "could", "will", "would", "should",
+    "не", "нет", "без", "это", "как", "что", "для", "при", "или", "так",
+    "его", "ее", "они", "она", "мы", "вы", "быть", "был", "была", "были",
+    "есть", "на", "из", "к", "по", "и", "а", "но", "же", "ли", "этот",
+    "эта", "эти", "который", "которая", "которые", "может", "могут",
+}
+_NEGATION_PATTERNS = (
+    r"\bnot\b", r"\bno\b", r"\bnever\b", r"\bwithout\b", r"\bcannot\b",
+    r"\bcan't\b", r"\bdoesn't\b", r"\bdon't\b", r"\bdidn't\b",
+    r"\bisn't\b", r"\baren't\b", r"\bwasn't\b", r"\bweren't\b",
+    r"\bwon't\b", r"\bне\b", r"\bнет\b", r"\bникогда\b", r"\bбез\b",
+    r"\bнельзя\b", r"\bне\s+является\b", r"\bне\s+имеет\b",
+)
+
+def _claim_comparison_terms(text: str) -> set[str]:
+    return {
+        token.casefold()
+        for token in re.findall(r"[^\W_]+", text, flags=re.UNICODE)
+        if len(token) > 2
+        and not token.isdigit()
+        and token.casefold() not in _CLAIM_STOPWORDS
+    }
+
+def _claim_polarity(text: str) -> str:
+    lowered = text.casefold()
+    if any(re.search(pattern, lowered, flags=re.UNICODE) for pattern in _NEGATION_PATTERNS):
+        return "negated"
+    return "affirmed"
+
 @dataclass(frozen=True, slots=True)
 class EvidenceReview:
     query: str
@@ -63,9 +99,11 @@ class EvidenceReview:
     shared_query_terms: tuple[str, ...]
     suggested_topics: tuple[str, ...]
     caveat: str
+    extracted_claims: tuple[dict[str, Any], ...] = ()
+    potential_contradictions: tuple[dict[str, Any], ...] = ()
 
 class ReasoningEngine:
-    """A transparent rule engine; keyword relevance is not semantic understanding."""
+    """A transparent rule engine; lexical claim comparison is not semantic understanding."""
     def forward_chain(self, facts: Iterable[KnowledgeFact], rules: Iterable[InferenceRule], *, max_steps: int = 100) -> InferenceResult:
         if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 1000:
             raise ValueError("max_steps must be an integer from 1 to 1,000")
@@ -106,6 +144,124 @@ class ReasoningEngine:
         conflicts = tuple(f"Conflicting values for {key}: {', '.join(sorted(values))}" for key, values in sorted(by_predicate.items()) if len(values) > 1)
         return InferenceResult(tuple(current), tuple(trace), conflicts, steps)
 
+    def extract_claims(
+        self, documents: Iterable[dict[str, Any]], *, max_claims: int = 50
+    ) -> tuple[dict[str, Any], ...]:
+        """Extract sentence-level claim candidates with source provenance.
+
+        This is a transparent sentence heuristic. It does not decide whether a
+        sentence is factual, true, supported, or entailed by its source.
+        """
+        if isinstance(max_claims, bool) or not isinstance(max_claims, int) or not 1 <= max_claims <= 200:
+            raise ValueError("max_claims must be an integer from 1 to 200")
+        items = list(documents)
+        if len(items) > 100:
+            raise ValueError("at most 100 documents may be processed")
+        claims: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url, title, content = item.get("url"), item.get("title", ""), item.get("content", "")
+            if not isinstance(url, str) or not isinstance(title, str) or not isinstance(content, str):
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+                continue
+            publisher = parsed.hostname.lower()
+            if not content.strip():
+                continue
+            sentences = [
+                sentence.strip()
+                for sentence in re.split(r"(?<=[.!?。！？])\s+|\n+", content)
+                if sentence.strip()
+            ]
+            if not sentences:
+                sentences = [content.strip()]
+            for sentence in sentences:
+                sentence = re.sub(r"\s+", " ", sentence).strip()
+                if len(sentence) < 12 or len(sentence) > 800 or sentence.endswith("?"):
+                    continue
+                words = re.findall(r"[^\W_]+", sentence, flags=re.UNICODE)
+                if len(words) < 3:
+                    continue
+                dedupe_key = (url, sentence.casefold())
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                digest = hashlib.sha256(
+                    (url + "\0" + sentence.casefold()).encode("utf-8")
+                ).hexdigest()[:20]
+                claims.append({
+                    "claim_id": digest,
+                    "text": sentence,
+                    "title": title[:300],
+                    "source_url": url,
+                    "publisher_domain": publisher,
+                    "observed_at": item.get("fetched_at") if isinstance(item.get("fetched_at"), str) else None,
+                    "source_hash": item.get("content_sha256") if isinstance(item.get("content_sha256"), str) else None,
+                    "comparison_terms": sorted(_claim_comparison_terms(sentence)),
+                    "polarity": _claim_polarity(sentence),
+                    "extraction_method": "sentence_heuristic_v1",
+                    "extraction_confidence": 0.4,
+                    "independently_verified": False,
+                })
+                if len(claims) >= max_claims:
+                    return tuple(claims)
+        return tuple(claims)
+
+    def detect_potential_contradictions(
+        self, claims: Iterable[dict[str, Any]], *, max_findings: int = 20
+    ) -> tuple[dict[str, Any], ...]:
+        """Find narrow, negation-based contradiction candidates across URLs.
+
+        Similarity plus opposite polarity is only a review queue signal; it is not
+        evidence that either claim is true or that the pair logically contradicts.
+        """
+        if isinstance(max_findings, bool) or not isinstance(max_findings, int) or not 1 <= max_findings <= 100:
+            raise ValueError("max_findings must be an integer from 1 to 100")
+        items = [claim for claim in claims if isinstance(claim, dict)]
+        if len(items) > 200:
+            raise ValueError("at most 200 claims may be compared")
+        findings: list[dict[str, Any]] = []
+        for index, first in enumerate(items):
+            first_terms = set(first.get("comparison_terms", []))
+            if len(first_terms) < 2:
+                continue
+            for second in items[index + 1:]:
+                if first.get("source_url") == second.get("source_url"):
+                    continue
+                if first.get("polarity") == second.get("polarity"):
+                    continue
+                second_terms = set(second.get("comparison_terms", []))
+                if len(second_terms) < 2:
+                    continue
+                union = first_terms | second_terms
+                overlap = len(first_terms & second_terms) / max(1, len(union))
+                if overlap < 0.80:
+                    continue
+                affirmed = first if first.get("polarity") == "affirmed" else second
+                negated = second if first.get("polarity") == "affirmed" else first
+                findings.append({
+                    "finding_id": hashlib.sha256(
+                        (str(first.get("claim_id")) + "\0" + str(second.get("claim_id"))).encode("utf-8")
+                    ).hexdigest()[:20],
+                    "kind": "opposite_polarity_lexical_match",
+                    "status": "candidate_requires_review",
+                    "claim_ids": [first.get("claim_id"), second.get("claim_id")],
+                    "claims": [
+                        {"text": affirmed.get("text"), "source_url": affirmed.get("source_url")},
+                        {"text": negated.get("text"), "source_url": negated.get("source_url")},
+                    ],
+                    "shared_terms": sorted(first_terms & second_terms),
+                    "lexical_overlap": round(overlap, 3),
+                    "independently_verified": False,
+                    "limitation": "Negation and lexical similarity are heuristic signals, not semantic contradiction proof.",
+                })
+                if len(findings) >= max_findings:
+                    return tuple(findings)
+        return tuple(findings)
+
     def review_documents(self, query: str, documents: Iterable[dict[str, Any]], *, max_excerpts: int = 5) -> EvidenceReview:
         if not isinstance(query, str) or not query.strip() or len(query) > 2000:
             raise ValueError("query must contain 1-2,000 characters")
@@ -140,7 +296,14 @@ class ReasoningEngine:
         caveat = "Keyword overlap is a retrieval heuristic, not proof of truth, causality, or logical entailment. External text remains unverified."
         if status == "single_publisher_unverified":
             caveat += " Retrieved pages come from one publisher and do not independently corroborate one another."
-        return EvidenceReview(query, status, unique_urls, unique_publishers, tuple(item for _, item in excerpts[:max_excerpts]), tuple(sorted(query_terms)), tuple(self.suggest_topics(items, excluded=(query,))), caveat)
+        claims = self.extract_claims(items)
+        potential_contradictions = self.detect_potential_contradictions(claims)
+        return EvidenceReview(
+            query, status, unique_urls, unique_publishers,
+            tuple(item for _, item in excerpts[:max_excerpts]),
+            tuple(sorted(query_terms)), tuple(self.suggest_topics(items, excluded=(query,))),
+            caveat, claims, potential_contradictions,
+        )
 
     def suggest_topics(self, documents: Iterable[dict[str, Any]], *, excluded: Iterable[str] = (), limit: int = 4) -> list[str]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
