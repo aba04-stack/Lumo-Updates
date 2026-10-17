@@ -151,17 +151,24 @@ class AffectEngine:
         }
 
     def state(self) -> AffectState:
-        event = self.store.latest_event("affect-state-updated")
-        if event is None:
-            return AffectState()
-        payload = event["payload"].get("state", {})
-        try:
-            values = {name: validate_score(payload[name]) for name in _BASELINE}
-            updated_at = payload.get("updated_at", event["created_at"])
-            if isinstance(updated_at, str):
-                return AffectState(**values, updated_at=updated_at)
-        except (KeyError, ValueError):
-            pass
+        # Skip malformed recent state events and restore the newest valid state
+        # from this stream; unrelated events and bad payloads must not reset it.
+        for event in self.store.events_of_types(
+            ["affect-state-updated"], limit=1_000, newest_first=True
+        ):
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            state_payload = payload.get("state")
+            if not isinstance(state_payload, dict):
+                continue
+            try:
+                values = {name: validate_score(state_payload[name]) for name in _BASELINE}
+                updated_at = state_payload.get("updated_at", event["created_at"])
+                if isinstance(updated_at, str):
+                    return AffectState(**values, updated_at=updated_at)
+            except (KeyError, TypeError, ValueError):
+                continue
         return AffectState()
 
     def _transition(self, features: dict[str, float], *, trigger: str) -> AffectState:
