@@ -236,7 +236,7 @@ class Store:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 row = self._connection.execute(
-                    "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
+                    "SELECT task_type, status, version FROM strategies WHERE strategy_id = ?",
                     (strategy_id,),
                 ).fetchone()
                 if row is None:
@@ -306,10 +306,10 @@ class Store:
             raise ValueError("candidate_scores must be a list/tuple")
         if not 2 <= len(case_ids) <= 10_000:
             raise ValueError("promotion requires 2-10,000 fixed evaluation cases")
-        if len(set(case_ids)) != len(case_ids):
-            raise ValueError("case_ids must be unique")
         for case_id in case_ids:
             validate_identifier(case_id, "case_id")
+        if len(set(case_ids)) != len(case_ids):
+            raise ValueError("case_ids must be unique")
         if len(baseline_scores) != len(case_ids) or len(candidate_scores) != len(case_ids):
             raise ValueError("each evaluation case must have baseline and candidate scores")
         base_values = [validate_score(value) for value in baseline_scores]
@@ -325,7 +325,7 @@ class Store:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
                 candidate = self._connection.execute(
-                    "SELECT task_type, status, parent_id FROM strategies WHERE strategy_id = ?",
+                    "SELECT task_type, status, parent_id, version FROM strategies WHERE strategy_id = ?",
                     (candidate_id,),
                 ).fetchone()
                 if candidate is None:
@@ -344,6 +344,10 @@ class Store:
                     raise ValueError("baseline and candidate task_type must match")
                 if baseline_id == candidate_id:
                     raise ValueError("candidate cannot be its own baseline")
+                if candidate["parent_id"] != baseline_id:
+                    raise ValueError("candidate lineage does not match the evaluated baseline")
+                if int(candidate["version"]) <= int(baseline["version"]):
+                    raise ValueError("candidate version must be greater than the evaluated baseline")
                 self._connection.execute(
                     "UPDATE strategies SET status = 'active' WHERE strategy_id = ? AND status = 'candidate'",
                     (candidate_id,),
