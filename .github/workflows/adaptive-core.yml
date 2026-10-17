@@ -1,0 +1,33 @@
+name: Adaptive Core CI
+
+on:
+  push:
+    paths:
+      - "adaptive-core/**"
+      - ".github/workflows/adaptive-core.yml"
+  pull_request:
+    paths:
+      - "adaptive-core/**"
+      - ".github/workflows/adaptive-core.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: adaptive-core/pyproject.toml
+      - name: Install package and test dependency
+        run: python -m pip install -e "adaptive-core[dev]"
+      - name: Compile
+        run: python -m compileall -q adaptive-core/src adaptive-core/tests
+      - name: Run regression tests
+        run: python -m pytest adaptive-core/tests -q
