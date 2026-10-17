@@ -23,7 +23,16 @@ class AutonomousLearningLoop:
         self.reasoner: ReasoningEngine = cognitive.reasoner
         self.language, self.pages_per_topic = language, pages_per_topic
         has_queue = any(event["event_type"] == "autonomous-topic-queued" for event in self._events())
-        initial = tuple(topics) if topics is not None else (_DEFAULT_TOPICS if not has_queue else ())
+        if topics is None:
+            initial = list(_DEFAULT_TOPICS if not has_queue else ())
+        else:
+            if isinstance(topics, (str, bytes)):
+                raise ValueError("topics must be an iterable of topic strings, not a single string")
+            initial = []
+            for topic in topics:
+                if len(initial) >= 100:
+                    raise ValueError("at most 100 initial topics may be queued")
+                initial.append(topic)
         for topic in initial:
             self.queue_topic(topic, priority=0.6, reason="initial_research_goal")
 
