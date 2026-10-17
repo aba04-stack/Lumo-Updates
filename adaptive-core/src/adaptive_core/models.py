@@ -77,8 +77,10 @@ class EvaluationCase:
         validate_identifier(self.task_type, "task_type")
         if not isinstance(self.input_text, str) or len(self.input_text) > 200_000:
             raise ValueError("input_text must be a string no longer than 200,000 characters")
-        if self.expected is not None and not isinstance(self.expected, str):
-            raise ValueError("expected must be a string or None")
+        if self.expected is not None and (
+            not isinstance(self.expected, str) or len(self.expected) > 200_000
+        ):
+            raise ValueError("expected must be a string of at most 200,000 characters or None")
 
 
 @dataclass(frozen=True, slots=True)
