@@ -1,7 +1,8 @@
-"""Small, synthetic regression benchmark for heuristic claim review.
+"""Hand-labelled synthetic benchmark for the supported slice of claim review.
 
-This fixture validates known narrow cases only. Its scores are not an estimate of
-real-world accuracy or semantic understanding.
+Results are regression diagnostics for these authored examples, not a measure of
+real-world accuracy. Hard semantic paraphrases remain explicitly unscored and
+are listed as known limitations instead of being hidden by a perfect score.
 """
 from __future__ import annotations
 
@@ -10,13 +11,13 @@ from adaptive_core import ReasoningEngine
 
 CASES = (
     {
-        "name": "negation mismatch",
+        "name": "direct negation",
         "documents": [
             {"title": "A", "url": "https://one.example/earth", "content": "Earth is round."},
             {"title": "B", "url": "https://two.example/earth", "content": "Earth is not round."},
         ],
-        "expected_candidate": True,
-        "expected_kind": "opposite_polarity_lexical_match",
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "opposite_polarity_lexical_match",
     },
     {
         "name": "same-unit quantity mismatch",
@@ -24,29 +25,29 @@ CASES = (
             {"title": "A", "url": "https://one.example/mars", "content": "Mars has 2 moons."},
             {"title": "B", "url": "https://two.example/mars", "content": "Mars has 3 moons."},
         ],
-        "expected_candidate": True,
-        "expected_kind": "same_unit_numeric_mismatch",
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "same_unit_numeric_mismatch",
     },
     {
-        "name": "year mismatch",
+        "name": "same-context year mismatch",
         "documents": [
             {"title": "A", "url": "https://one.example/bridge", "content": "The bridge opened in 1998."},
             {"title": "B", "url": "https://two.example/bridge", "content": "The bridge opened in 2001."},
         ],
-        "expected_candidate": True,
-        "expected_kind": "year_value_mismatch",
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "year_value_mismatch",
     },
     {
         "name": "same source is not independent comparison",
         "documents": [
             {
-                "title": "One page",
-                "url": "https://one.example/mars",
+                "title": "One page", "url": "https://one.example/mars",
                 "content": "Mars has 2 moons. Mars has 3 moons.",
             }
         ],
-        "expected_candidate": False,
-        "expected_kind": None,
+        "relation": "contradiction", "scorable": False,
+        "expected_candidate": False, "expected_kind": None,
+        "known_limitation": "same-source comparisons are excluded by policy",
     },
     {
         "name": "different units are not silently converted",
@@ -54,8 +55,9 @@ CASES = (
             {"title": "A", "url": "https://one.example/route", "content": "The route is 3 km long."},
             {"title": "B", "url": "https://two.example/route", "content": "The route is 3 miles long."},
         ],
-        "expected_candidate": False,
-        "expected_kind": None,
+        "relation": "unsupported_by_current_numeric_policy", "scorable": False,
+        "expected_candidate": False, "expected_kind": None,
+        "known_limitation": "unit conversion is intentionally not attempted",
     },
     {
         "name": "equivalent unit alias and value",
@@ -63,17 +65,17 @@ CASES = (
             {"title": "A", "url": "https://one.example/tower", "content": "The tower is 3 km tall."},
             {"title": "B", "url": "https://two.example/tower", "content": "The tower is 3 kilometers tall."},
         ],
-        "expected_candidate": False,
-        "expected_kind": None,
+        "relation": "coexistence", "scorable": True,
+        "expected_candidate": False, "expected_kind": None,
     },
     {
-        "name": "different subjects despite one shared word",
+        "name": "different subjects despite shared word",
         "documents": [
             {"title": "A", "url": "https://one.example/square", "content": "The square is not round."},
             {"title": "B", "url": "https://two.example/earth", "content": "Earth is round."},
         ],
-        "expected_candidate": False,
-        "expected_kind": None,
+        "relation": "coexistence", "scorable": True,
+        "expected_candidate": False, "expected_kind": None,
     },
     {
         "name": "numerically different but lexically unrelated",
@@ -81,15 +83,106 @@ CASES = (
             {"title": "A", "url": "https://one.example/mars", "content": "Mars has 2 moons."},
             {"title": "B", "url": "https://two.example/city", "content": "A city has 3 buildings."},
         ],
-        "expected_candidate": False,
-        "expected_kind": None,
+        "relation": "coexistence", "scorable": True,
+        "expected_candidate": False, "expected_kind": None,
+    },
+    {
+        "name": "existential claims can both be true",
+        "documents": [
+            {"title": "A", "url": "https://one.example/work", "content": "Some employees work remotely."},
+            {"title": "B", "url": "https://two.example/work", "content": "Some employees do not work remotely."},
+        ],
+        "relation": "coexistence", "scorable": True,
+        "expected_candidate": False, "expected_kind": None,
+    },
+    {
+        "name": "existential claims with plural nouns can coexist",
+        "documents": [
+            {"title": "A", "url": "https://one.example/cats", "content": "Some cats live indoors."},
+            {"title": "B", "url": "https://two.example/cats", "content": "Some cats do not live indoors."},
+        ],
+        "relation": "coexistence", "scorable": True,
+        "expected_candidate": False, "expected_kind": None,
+    },
+    {
+        "name": "different year contexts do not prove polarity conflict",
+        "documents": [
+            {"title": "A", "url": "https://one.example/paper", "content": "The researcher did not publish the paper in 2020."},
+            {"title": "B", "url": "https://two.example/paper", "content": "The researcher published the paper in 2021."},
+        ],
+        "relation": "coexistence", "scorable": True,
+        "expected_candidate": False, "expected_kind": None,
+    },
+    {
+        "name": "same predicate with direct opposite polarity",
+        "documents": [
+            {"title": "A", "url": "https://one.example/door", "content": "The door is locked."},
+            {"title": "B", "url": "https://two.example/door", "content": "The door is not locked."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "opposite_polarity_lexical_match",
+    },
+    {
+        "name": "numeric mismatch with singular/plural normalization",
+        "documents": [
+            {"title": "A", "url": "https://one.example/windows", "content": "The room has 2 windows."},
+            {"title": "B", "url": "https://two.example/windows", "content": "The room has 3 windows."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "same_unit_numeric_mismatch",
+    },
+    {
+        "name": "number words are treated as counts",
+        "documents": [
+            {"title": "A", "url": "https://one.example/jupiter", "content": "Jupiter has two moons."},
+            {"title": "B", "url": "https://two.example/jupiter", "content": "Jupiter has three moons."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "same_unit_numeric_mismatch",
+    },
+    {
+        "name": "no moons versus a moon",
+        "documents": [
+            {"title": "A", "url": "https://one.example/mercury", "content": "Mercury has no moons."},
+            {"title": "B", "url": "https://two.example/mercury", "content": "Mercury has a moon."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "opposite_polarity_lexical_match",
+    },
+    {
+        "name": "all versus not all",
+        "documents": [
+            {"title": "A", "url": "https://one.example/birds", "content": "All birds can fly."},
+            {"title": "B", "url": "https://two.example/birds", "content": "Not all birds can fly."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "opposite_polarity_lexical_match",
+    },
+    {
+        "name": "different years and opposite polarity may coexist",
+        "documents": [
+            {"title": "A", "url": "https://one.example/event", "content": "The event did not happen in 2020."},
+            {"title": "B", "url": "https://two.example/event", "content": "The event happened in 2021."},
+        ],
+        "relation": "coexistence", "scorable": True,
+        "expected_candidate": False, "expected_kind": None,
+    },
+    {
+        "name": "paraphrase and synonym remain a known miss",
+        "documents": [
+            {"title": "A", "url": "https://one.example/mars", "content": "Mars has 2 moons."},
+            {"title": "B", "url": "https://two.example/mars", "content": "Mars has three natural satellites."},
+        ],
+        "relation": "contradiction", "scorable": False,
+        "expected_candidate": False, "expected_kind": None,
+        "known_limitation": "the lexical overlap threshold does not map moons to natural satellites",
     },
 )
 
 
-def test_synthetic_claim_review_benchmark() -> None:
+def _evaluate_cases():
     engine = ReasoningEngine()
-    results = []
+    rows = []
     for case in CASES:
         claims = engine.extract_claims(case["documents"])
         findings = engine.detect_potential_contradictions(claims)
@@ -98,15 +191,53 @@ def test_synthetic_claim_review_benchmark() -> None:
         assert candidate is case["expected_candidate"], case["name"]
         assert kind == case["expected_kind"], case["name"]
         assert all(finding["independently_verified"] is False for finding in findings)
-        results.append((case["expected_candidate"], candidate))
+        rows.append({
+            "name": case["name"],
+            "relation": case["relation"],
+            "scorable": case["scorable"],
+            "predicted_candidate": candidate,
+            "findings": findings,
+        })
+    return rows
 
-    true_positives = sum(expected and predicted for expected, predicted in results)
-    false_positives = sum(not expected and predicted for expected, predicted in results)
-    false_negatives = sum(expected and not predicted for expected, predicted in results)
-    precision = true_positives / max(1, true_positives + false_positives)
-    recall = true_positives / max(1, true_positives + false_negatives)
 
-    # These metrics describe only this tiny hand-authored fixture.
-    assert len(CASES) == 8
-    assert precision == 1.0
-    assert recall == 1.0
+def _metrics(rows):
+    scored = [row for row in rows if row["scorable"]]
+    tp = sum(row["relation"] == "contradiction" and row["predicted_candidate"] for row in scored)
+    fp = sum(row["relation"] != "contradiction" and row["predicted_candidate"] for row in scored)
+    fn = sum(row["relation"] == "contradiction" and not row["predicted_candidate"] for row in scored)
+    tn = sum(row["relation"] != "contradiction" and not row["predicted_candidate"] for row in scored)
+    return {
+        "scored_cases": len(scored),
+        "true_positives": tp,
+        "false_positives": fp,
+        "false_negatives": fn,
+        "true_negatives": tn,
+        "precision": tp / max(1, tp + fp),
+        "recall": tp / max(1, tp + fn),
+        "known_limitation_cases": sum(not case["scorable"] and "known_limitation" in case for case in CASES),
+    }
+
+
+def test_expanded_claim_review_benchmark() -> None:
+    rows = _evaluate_cases()
+    metrics = _metrics(rows)
+    assert len(CASES) == 17
+    # These are precision/recall values over 15 hand-labelled, in-scope synthetic
+    # cases only. The two explicitly unscored cases are retained as known policy/
+    # coverage limits and are not hidden inside the headline metrics.
+    assert metrics["scored_cases"] == 15
+    assert metrics["false_positives"] == 0, metrics
+    assert metrics["false_negatives"] == 0, metrics
+    assert metrics["precision"] == 1.0
+    assert metrics["recall"] == 1.0
+    assert metrics["known_limitation_cases"] == 2
+    assert metrics["true_positives"] == 8
+    assert metrics["true_negatives"] == 7
+
+
+def test_benchmark_reports_known_unscored_cases_instead_of_claiming_general_accuracy() -> None:
+    rows = _evaluate_cases()
+    known_misses = [row["name"] for row in rows if not row["scorable"] and row["relation"] == "contradiction"]
+    assert known_misses == ["paraphrase and synonym remain a known miss"]
+    assert all(row["predicted_candidate"] is False for row in rows if not row["scorable"])
