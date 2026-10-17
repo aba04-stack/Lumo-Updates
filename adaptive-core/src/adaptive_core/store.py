@@ -149,15 +149,6 @@ class Store:
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
-                if status == "active":
-                    active_count = self._connection.execute(
-                        "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
-                        (config.task_type,),
-                    ).fetchone()["n"]
-                    if int(active_count) > 0:
-                        raise ValueError(
-                            "a strategy cannot start active when another is active; create a candidate and evaluate it"
-                        )
                 self._connection.execute(
                     """
                     INSERT INTO strategies
@@ -333,7 +324,7 @@ class Store:
                 if candidate["status"] != "candidate":
                     raise ValueError("only a candidate strategy can be promoted")
                 baseline = self._connection.execute(
-                    "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
+                    "SELECT task_type, status, version FROM strategies WHERE strategy_id = ?",
                     (baseline_id,),
                 ).fetchone()
                 if baseline is None:
