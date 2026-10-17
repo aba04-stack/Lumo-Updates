@@ -164,3 +164,77 @@ def test_proposal_feedback_keeps_task_history_despite_unrelated_event_noise() ->
         assert "domain-failure-recorded" in {
             event["event_type"] for event in captured[0]["recent_event_types"]
         }
+
+
+def test_proposal_audit_failure_rolls_back_candidate_creation() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        core.create_baseline("math")
+        manager = EvolutionManager(core)
+        record_event = store.record_event
+
+        def fail_proposal_event(event_type, task_type, payload):
+            if event_type == "candidate-proposed":
+                raise RuntimeError("simulated audit failure")
+            return record_event(event_type, task_type, payload)
+
+        store.record_event = fail_proposal_event
+        with pytest.raises(RuntimeError, match="simulated audit failure"):
+            manager.propose_and_evaluate(
+                "math",
+                build_cases(),
+                proposer=lambda current, _: StrategyConfig(
+                    "candidate-audit-rollback",
+                    "math",
+                    "A candidate should be rolled back if its proposal audit fails.",
+                    version=current.version + 1,
+                ),
+                evaluator=lambda *_: 0.9,
+            )
+
+        assert store.list_strategies("math", status="candidate") == []
+        event_types = {event["event_type"] for event in store.events_for_task("math", limit=50)}
+        assert "candidate-proposed" not in event_types
+        assert not any(
+            event["payload"].get("strategy_id") == "candidate-audit-rollback"
+            for event in store.events_for_task("math", limit=50)
+            if event["event_type"] == "strategy-created"
+        )
+
+
+def test_restore_audit_failure_keeps_strategy_disabled() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        baseline = core.create_baseline("restore-audit")
+        candidate = core.register_candidate(
+            StrategyConfig(
+                "restore-candidate", "restore-audit", "Audited version.",
+                version=baseline.config.version + 1,
+            ),
+            parent_id=baseline.config.strategy_id,
+        )
+        cases = [
+            EvaluationCase(f"restore-case-{i}", "restore-audit", f"input-{i}", "expected")
+            for i in range(1, 6)
+        ]
+        decision = EvolutionManager(core).evaluate_candidate(
+            candidate.config.strategy_id, cases,
+            lambda strategy, case: 0.9 if strategy.strategy_id == candidate.config.strategy_id else 0.6,
+        )
+        assert decision.accepted
+        manager = EvolutionManager(core)
+        manager.rollback(candidate.config.strategy_id)
+        assert store.get_strategy(candidate.config.strategy_id).status == "disabled"
+
+        record_event = store.record_event
+
+        def fail_restore_event(event_type, task_type, payload):
+            if event_type == "strategy-restored":
+                raise RuntimeError("simulated restore audit failure")
+            return record_event(event_type, task_type, payload)
+
+        store.record_event = fail_restore_event
+        with pytest.raises(RuntimeError, match="simulated restore audit failure"):
+            manager.restore(candidate.config.strategy_id)
+
+        assert store.get_strategy(candidate.config.strategy_id).status == "disabled"
