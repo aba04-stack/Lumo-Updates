@@ -248,17 +248,25 @@ class ReasoningEngine:
             raise TypeError("facts must contain KnowledgeFact objects")
         if any(not isinstance(rule, InferenceRule) for rule in rule_list):
             raise TypeError("rules must contain InferenceRule objects")
-        known = {(fact.predicate, fact.value) for fact in current}
+        # Index exact premise pairs once. Re-scanning all facts for every rule
+        # premise at each inference step made maximum-size inputs needlessly costly.
+        best_fact_by_pair: dict[tuple[str, str], KnowledgeFact] = {}
+        for fact in current:
+            pair = (fact.predicate, fact.value)
+            existing = best_fact_by_pair.get(pair)
+            if existing is None or fact.confidence > existing.confidence:
+                best_fact_by_pair[pair] = fact
+        known = set(best_fact_by_pair)
         trace, steps, changed = [], 0, True
         while changed and steps < max_steps:
             changed = False
             for rule in rule_list:
                 matching = []
                 for predicate, value in rule.premises:
-                    candidates = [fact for fact in current if fact.predicate == predicate and fact.value == value]
-                    if not candidates:
+                    fact = best_fact_by_pair.get((predicate, value))
+                    if fact is None:
                         break
-                    matching.append(max(candidates, key=lambda fact: fact.confidence))
+                    matching.append(fact)
                 else:
                     predicate, value = rule.conclusion
                     pair = (predicate, value)
@@ -266,7 +274,12 @@ class ReasoningEngine:
                         continue
                     steps += 1
                     confidence = min(fact.confidence for fact in matching) * rule.reliability
-                    current.append(KnowledgeFact(predicate, value, "rule:" + rule.rule_id, confidence, inferred_by=rule.rule_id))
+                    inferred = KnowledgeFact(
+                        predicate, value, "rule:" + rule.rule_id,
+                        confidence, inferred_by=rule.rule_id,
+                    )
+                    current.append(inferred)
+                    best_fact_by_pair[pair] = inferred
                     known.add(pair)
                     trace.append(f"{rule.rule_id}: {', '.join(f'{f.predicate}={f.value}' for f in matching)} => {predicate}={value}; {rule.explanation}")
                     changed = True
