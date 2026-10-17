@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "adaptive-core-lab"
-version = "0.7.0"
+version = "0.8.0"
 description = "An experimental adaptive cognition and bounded autonomous research core"
 requires-python = ">=3.11"
 dependencies = []
