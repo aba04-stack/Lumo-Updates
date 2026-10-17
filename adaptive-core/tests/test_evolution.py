@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from adaptive_core import (
     AdaptiveCore,
     EvaluationCase,
@@ -70,7 +72,7 @@ def test_large_regression_blocks_promotion_even_when_mean_improves() -> None:
         )
 
         assert not decision.accepted
-        assert decision.max_case_regression == 0.40
+        assert decision.max_case_regression == pytest.approx(0.40)
         assert store.get_strategy(candidate.config.strategy_id).status == "candidate"
 
 
