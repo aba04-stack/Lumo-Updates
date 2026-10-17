@@ -191,3 +191,16 @@ def test_untrusted_memory_metadata_cannot_contain_non_finite_values() -> None:
                 metadata={"bad": float("nan")},
             )
         assert store.search_episodes(task_type="math") == []
+
+
+def test_self_model_failure_history_survives_unrelated_event_noise() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        core.create_baseline("reasoning")
+        cognitive = CognitiveSystem(core)
+        store.record_event("task-execution-failed", "reasoning", {"error_type": "KnownFailure"})
+        for index in range(250):
+            store.record_event("unrelated-noise", "another-task", {"index": index})
+
+        report = cognitive.self_model.report("reasoning")
+        assert "task-execution-failed" in report.recent_failure_events
