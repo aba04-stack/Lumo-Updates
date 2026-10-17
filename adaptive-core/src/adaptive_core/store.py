@@ -184,6 +184,7 @@ class Store:
         return self.get_strategy(config.strategy_id)
 
     def get_strategy(self, strategy_id: str) -> StoredStrategy:
+        validate_identifier(strategy_id, "strategy_id")
         with self._lock:
             row = self._connection.execute(
                 "SELECT * FROM strategies WHERE strategy_id = ?", (strategy_id,)
@@ -195,7 +196,8 @@ class Store:
     def list_strategies(
         self, task_type: str, *, status: str | None = None
     ) -> list[StoredStrategy]:
-        if status is not None and status not in _STATUSES:
+        validate_identifier(task_type, "task_type")
+        if status is not None and (not isinstance(status, str) or status not in _STATUSES):
             raise ValueError(f"unsupported status: {status}")
         query = "SELECT * FROM strategies WHERE task_type = ?"
         args: tuple[Any, ...] = (task_type,)
@@ -432,6 +434,8 @@ class Store:
             strategy = self.get_strategy(strategy_id)
             if strategy.config.task_type != task_type:
                 raise ValueError("task_type does not match the strategy")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dictionary or None")
         tags_json = _json_dump(normalized_tags)
         metadata_json = _json_dump(metadata or {})
         created_at = _utc_now()
@@ -521,11 +525,21 @@ class Store:
 
     @staticmethod
     def _event_record(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {"_invalid_payload": True, "_payload_error": "invalid_json"}
+        if not isinstance(payload, dict):
+            payload = {
+                "_invalid_payload": True,
+                "_payload_error": "payload_not_object",
+                "_payload_type": type(payload).__name__,
+            }
         return {
             "id": int(row["id"]),
             "event_type": row["event_type"],
             "task_type": row["task_type"],
-            "payload": json.loads(row["payload_json"]),
+            "payload": payload,
             "created_at": row["created_at"],
         }
 
