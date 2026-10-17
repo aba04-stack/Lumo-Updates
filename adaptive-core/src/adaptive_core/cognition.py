@@ -66,7 +66,9 @@ class CognitiveSystem:
         return documents
 
     def reason_about(self, query: str, *, documents: Iterable[dict[str, Any]] | None = None) -> EvidenceReview:
-        source_documents = list(documents) if documents is not None else self.internet.recall(query, limit=10)
+        # Pass caller iterables through so the reasoning engine can enforce
+        # its document budget before consuming a potentially unbounded generator.
+        source_documents = documents if documents is not None else self.internet.recall(query, limit=10)
         return self.reasoner.review_documents(query, source_documents)
 
     def assess_claim(self, claim: dict[str, Any], evidence: Iterable[dict[str, Any]], *,
