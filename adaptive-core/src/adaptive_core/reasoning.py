@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import re
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
 from typing import Any, Iterable
 from urllib.parse import urlparse
@@ -85,8 +86,94 @@ def _claim_comparison_terms(text: str) -> set[str]:
         and token.casefold() not in _CLAIM_STOPWORDS
     }
 
+_NUMERIC_PATTERN = re.compile(
+    r"(?<![\w])(?P<number>\d{1,3}(?:[ ,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)"
+    r"\s*(?P<unit>%|percent(?:age)?|per\s+cent|km|kilometers?|kilometres?|"
+    r"miles?|meters?|metres?|kg|kilograms?|g|grams?|mg|milligrams?|"
+    r"°\s*[cf]|celsius|fahrenheit|hours?|minutes?|seconds?|days?|years?|"
+    r"million|billion|thousand|тыс(?:яч)?|миллиард(?:а|ов)?|миллион(?:а|ов)?|"
+    r"километров?|км|метров?|кг|грамм(?:а|ов)?|млн|млрд|процент(?:а|ов)?)?"
+    r"(?![\w])",
+    flags=re.IGNORECASE | re.UNICODE,
+)
+_UNIT_ALIASES = {
+    "%": "percent", "percent": "percent", "percentage": "percent", "per cent": "percent",
+    "km": "km", "kilometer": "km", "kilometers": "km", "kilometre": "km", "kilometres": "km",
+    "километров": "km", "км": "km",
+    "m": "m", "meter": "m", "meters": "m", "metre": "m", "metres": "m", "метров": "m",
+    "kg": "kg", "kilogram": "kg", "kilograms": "kg", "кг": "kg",
+    "g": "g", "gram": "g", "grams": "g", "грамм": "g", "грамма": "g", "граммов": "g",
+    "mg": "mg", "milligram": "mg", "milligrams": "mg",
+    "°c": "celsius", "° c": "celsius", "celsius": "celsius",
+    "°f": "fahrenheit", "° f": "fahrenheit", "fahrenheit": "fahrenheit",
+    "hour": "hour", "hours": "hour", "час": "hour", "часа": "hour", "часов": "hour",
+    "minute": "minute", "minutes": "minute", "минута": "minute", "минуты": "minute", "минут": "minute",
+    "second": "second", "seconds": "second", "секунда": "second", "секунды": "second", "секунд": "second",
+    "day": "day", "days": "day", "день": "day", "дня": "day", "дней": "day",
+    "year": "year", "years": "year", "год": "year", "года": "year", "лет": "year",
+    "million": "million", "миллион": "million", "миллиона": "million", "миллионов": "million", "млн": "million",
+    "billion": "billion", "миллиард": "billion", "миллиарда": "billion", "миллиардов": "billion", "млрд": "billion",
+    "thousand": "thousand", "тыс": "thousand", "тысяч": "thousand",
+}
+
+def _decimal_value(raw: str) -> str | None:
+    normalized = raw.replace(" ", "")
+    if "," in normalized and "." in normalized:
+        # Use the last separator as the decimal separator when both occur.
+        if normalized.rfind(",") > normalized.rfind("."):
+            normalized = normalized.replace(".", "").replace(",", ".")
+        else:
+            normalized = normalized.replace(",", "")
+    elif "," in normalized:
+        tail = normalized.rsplit(",", 1)[1]
+        normalized = normalized.replace(",", "") if len(tail) == 3 and tail.isdigit() else normalized.replace(",", ".")
+    elif normalized.count(".") > 1:
+        parts = normalized.split(".")
+        if all(len(part) == 3 for part in parts[1:]):
+            normalized = "".join(parts)
+        else:
+            return None
+    try:
+        value = Decimal(normalized)
+    except InvalidOperation:
+        return None
+    if not value.is_finite():
+        return None
+    return format(value.normalize(), "f")
+
+def _extract_numeric_mentions(text: str) -> list[dict[str, Any]]:
+    """Extract auditable numeric/date-like spans; do not infer their meaning."""
+    mentions: list[dict[str, Any]] = []
+    for match in _NUMERIC_PATTERN.finditer(text):
+        raw = match.group("number")
+        numeric_value = _decimal_value(raw)
+        if numeric_value is None:
+            continue
+        raw_unit = (match.group("unit") or "").casefold()
+        normalized_unit = _UNIT_ALIASES.get(raw_unit, raw_unit)
+        value = Decimal(numeric_value)
+        if normalized_unit:
+            kind = "measurement_or_quantity"
+            unit = normalized_unit
+        elif value == value.to_integral_value() and 1800 <= value <= 2199:
+            # Bare four-digit dates are kept as years, not treated as physical quantities.
+            kind, unit = "year", "year"
+        else:
+            kind, unit = "scalar", "count"
+        mentions.append({
+            "raw": match.group(0).strip(),
+            "value": numeric_value,
+            "unit": unit,
+            "kind": kind,
+            "start": match.start(),
+            "end": match.end(),
+        })
+    return mentions
+
 def _claim_polarity(text: str) -> str:
     lowered = text.casefold()
+    # "not only X but also Y" is additive phrasing, not a negated claim.
+    lowered = re.sub(r"\bnot\s+only\b", "only", lowered)
     if any(re.search(pattern, lowered, flags=re.UNICODE) for pattern in _NEGATION_PATTERNS):
         return "negated"
     return "affirmed"
@@ -204,6 +291,7 @@ class ReasoningEngine:
                     "source_hash": item.get("content_sha256") if isinstance(item.get("content_sha256"), str) else None,
                     "comparison_terms": sorted(_claim_comparison_terms(sentence)),
                     "polarity": _claim_polarity(sentence),
+                    "numeric_mentions": _extract_numeric_mentions(sentence),
                     "extraction_method": "sentence_heuristic_v1",
                     "extraction_confidence": 0.4,
                     "independently_verified": False,
@@ -215,10 +303,11 @@ class ReasoningEngine:
     def detect_potential_contradictions(
         self, claims: Iterable[dict[str, Any]], *, max_findings: int = 20
     ) -> tuple[dict[str, Any], ...]:
-        """Find narrow, negation-based contradiction candidates across URLs.
+        """Queue conservative lexical/number mismatches for human review.
 
-        Similarity plus opposite polarity is only a review queue signal; it is not
-        evidence that either claim is true or that the pair logically contradicts.
+        These signals do not establish logical contradiction or determine which
+        source is correct. The numeric matcher is limited to same-unit values
+        and a high lexical overlap, so it intentionally misses many cases.
         """
         if isinstance(max_findings, bool) or not isinstance(max_findings, int) or not 1 <= max_findings <= 100:
             raise ValueError("max_findings must be an integer from 1 to 100")
@@ -226,14 +315,13 @@ class ReasoningEngine:
         if len(items) > 200:
             raise ValueError("at most 200 claims may be compared")
         findings: list[dict[str, Any]] = []
+        seen_pairs: set[tuple[str, str, str]] = set()
         for index, first in enumerate(items):
             first_terms = set(first.get("comparison_terms", []))
             if len(first_terms) < 2:
                 continue
             for second in items[index + 1:]:
                 if first.get("source_url") == second.get("source_url"):
-                    continue
-                if first.get("polarity") == second.get("polarity"):
                     continue
                 second_terms = set(second.get("comparison_terms", []))
                 if len(second_terms) < 2:
@@ -242,24 +330,80 @@ class ReasoningEngine:
                 overlap = len(first_terms & second_terms) / max(1, len(union))
                 if overlap < 0.80:
                     continue
-                affirmed = first if first.get("polarity") == "affirmed" else second
-                negated = second if first.get("polarity") == "affirmed" else first
-                findings.append({
+
+                kind: str | None = None
+                values: list[dict[str, Any]] = []
+                if first.get("polarity") != second.get("polarity"):
+                    kind = "opposite_polarity_lexical_match"
+                else:
+                    first_numbers = first.get("numeric_mentions", [])
+                    second_numbers = second.get("numeric_mentions", [])
+                    if not isinstance(first_numbers, list) or not isinstance(second_numbers, list):
+                        continue
+                    for first_number in first_numbers:
+                        if not isinstance(first_number, dict):
+                            continue
+                        for second_number in second_numbers:
+                            if not isinstance(second_number, dict):
+                                continue
+                            # Equal units are a hard guard: 3 km and 3 miles are
+                            # not contradictory, and conversions are not attempted.
+                            if first_number.get("unit") != second_number.get("unit"):
+                                continue
+                            if first_number.get("kind") != second_number.get("kind"):
+                                continue
+                            if first_number.get("value") == second_number.get("value"):
+                                continue
+                            number_kind = first_number.get("kind")
+                            candidate_kind = (
+                                "year_value_mismatch" if number_kind == "year"
+                                else "same_unit_numeric_mismatch"
+                            )
+                            kind = kind or candidate_kind
+                            if candidate_kind == "year_value_mismatch":
+                                kind = candidate_kind
+                            values.append({
+                                "unit": first_number.get("unit"),
+                                "first_value": first_number.get("value"),
+                                "second_value": second_number.get("value"),
+                                "first_span": [first_number.get("start"), first_number.get("end")],
+                                "second_span": [second_number.get("start"), second_number.get("end")],
+                            })
+                    if kind is None:
+                        continue
+                ids = sorted([str(first.get("claim_id")), str(second.get("claim_id"))])
+                dedupe_key = (ids[0], ids[1], kind)
+                if dedupe_key in seen_pairs:
+                    continue
+                seen_pairs.add(dedupe_key)
+                if kind == "opposite_polarity_lexical_match":
+                    claims_ordered = [
+                        first if first.get("polarity") == "affirmed" else second,
+                        second if first.get("polarity") == "affirmed" else first,
+                    ]
+                else:
+                    claims_ordered = [first, second]
+                finding: dict[str, Any] = {
                     "finding_id": hashlib.sha256(
-                        (str(first.get("claim_id")) + "\0" + str(second.get("claim_id"))).encode("utf-8")
+                        (ids[0] + "\0" + ids[1] + "\0" + kind).encode("utf-8")
                     ).hexdigest()[:20],
-                    "kind": "opposite_polarity_lexical_match",
+                    "kind": kind,
                     "status": "candidate_requires_review",
-                    "claim_ids": [first.get("claim_id"), second.get("claim_id")],
+                    "claim_ids": ids,
                     "claims": [
-                        {"text": affirmed.get("text"), "source_url": affirmed.get("source_url")},
-                        {"text": negated.get("text"), "source_url": negated.get("source_url")},
+                        {"text": item.get("text"), "source_url": item.get("source_url")}
+                        for item in claims_ordered
                     ],
                     "shared_terms": sorted(first_terms & second_terms),
                     "lexical_overlap": round(overlap, 3),
                     "independently_verified": False,
-                    "limitation": "Negation and lexical similarity are heuristic signals, not semantic contradiction proof.",
-                })
+                    "limitation": (
+                        "This is a heuristic review cue; it does not prove contradiction, truth, or source reliability."
+                    ),
+                }
+                if values:
+                    finding["numeric_differences"] = values[:10]
+                findings.append(finding)
                 if len(findings) >= max_findings:
                     return tuple(findings)
         return tuple(findings)
