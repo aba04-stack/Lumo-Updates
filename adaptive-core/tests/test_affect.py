@@ -104,3 +104,33 @@ def test_affect_state_ignores_malformed_latest_state_event() -> None:
         expected = engine.update("knowledge-found", intensity=0.8)
         store.record_event("affect-state-updated", "system", {"state": "corrupted"})
         assert engine.state() == expected
+
+
+def test_corrupt_latest_affect_model_cannot_expand_learned_weight_bounds() -> None:
+    with Store(":memory:") as store:
+        engine = AffectEngine(store)
+        engine.learn_from_outcome(features={"novelty": 1.0}, reward=0.5)
+        expected = engine.model_snapshot()
+        invalid_model = {
+            "affect_weights": {
+                emotion: {feature: 0.9 for feature in ("novelty", "progress", "uncertainty", "contradiction")}
+                for emotion in ("curiosity", "satisfaction", "frustration", "caution", "confidence", "engagement")
+            },
+            "reward_weights": {feature: 0.9 for feature in ("novelty", "progress", "uncertainty", "contradiction")},
+            "samples": 999,
+            "last_prediction_error": 0.1,
+        }
+        store.record_event("affect-model-trained", "system", {"model": invalid_model})
+        restored = engine.model_snapshot()
+        assert restored == expected
+
+
+def test_malformed_event_payloads_are_normalized_before_returning() -> None:
+    with Store(":memory:") as store:
+        store._connection.execute(
+            "INSERT INTO events(event_type, task_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            ("legacy-list-payload", "test", "[]", "2026-10-17T00:00:00+00:00"),
+        )
+        event = store.recent_events(limit=1)[0]
+        assert event["payload"]["_invalid_payload"] is True
+        assert event["payload"]["_payload_error"] == "payload_not_object"
