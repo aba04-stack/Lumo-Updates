@@ -108,6 +108,7 @@ _NUMERIC_PATTERN = re.compile(
 _UNIT_ALIASES = {
     "%": "percent", "percent": "percent", "percentage": "percent", "per cent": "percent",
     "km": "km", "kilometer": "km", "kilometers": "km", "kilometre": "km", "kilometres": "km",
+    "mile": "mile", "miles": "mile",
     "километров": "km", "км": "km",
     "m": "m", "meter": "m", "meters": "m", "metre": "m", "metres": "m", "метров": "m",
     "kg": "kg", "kilogram": "kg", "kilograms": "kg", "кг": "kg",
