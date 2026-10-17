@@ -350,6 +350,7 @@ class ReasoningEngine:
                 or not isinstance(text_value, str) or not text_value.strip() or len(text_value) > 800
                 or not isinstance(raw_terms, (list, tuple)) or not 2 <= len(raw_terms) <= 100
                 or any(not isinstance(term, str) or not term.strip() or len(term) > 80 for term in raw_terms)
+                or not isinstance(polarity, str)
                 or polarity not in {"affirmed", "negated"}
             ):
                 continue
