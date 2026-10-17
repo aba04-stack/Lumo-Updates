@@ -140,3 +140,29 @@ def test_autonomous_loop_surfaces_but_does_not_overstate_contradiction_candidate
     assert len(result["potential_contradictions"]) == 1
     assert result["contradiction_proxy"] > 0.0
     assert all(item["independently_verified"] is False for item in result["potential_contradictions"])
+
+
+def test_autonomous_loop_bounds_initial_topics_and_rejects_a_single_string() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        core.create_baseline("autonomous-research")
+        cognitive = CognitiveSystem(core, internet=FakeInternet())
+        try:
+            cognitive.autonomous_learning_loop(topics="not-a-topic-list")
+        except ValueError as exc:
+            assert "iterable of topic strings" in str(exc)
+        else:
+            raise AssertionError("a string must not be expanded into individual topics")
+
+        def endless_topics():
+            index = 0
+            while True:
+                index += 1
+                yield f"topic-{index}"
+
+        try:
+            cognitive.autonomous_learning_loop(topics=endless_topics())
+        except ValueError as exc:
+            assert "at most 100 initial topics" in str(exc)
+        else:
+            raise AssertionError("unbounded topic generators must be rejected")
