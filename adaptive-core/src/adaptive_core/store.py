@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from statistics import fmean
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -148,6 +149,15 @@ class Store:
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
+                if status == "active":
+                    active_count = self._connection.execute(
+                        "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
+                        (config.task_type,),
+                    ).fetchone()["n"]
+                    if int(active_count) > 0:
+                        raise ValueError(
+                            "a strategy cannot start active when another is active; create a candidate and evaluate it"
+                        )
                 self._connection.execute(
                     """
                     INSERT INTO strategies
@@ -238,6 +248,10 @@ class Store:
                     )
                 if old_status != new_status and new_status not in _TRANSITIONS[old_status]:
                     raise ValueError(f"invalid status transition: {old_status} -> {new_status}")
+                if old_status == "candidate" and new_status == "active":
+                    raise ValueError(
+                        "candidate activation requires a successful fixed-case evaluation"
+                    )
                 if old_status == "active" and new_status == "disabled":
                     remaining = self._connection.execute(
                         "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
@@ -262,6 +276,114 @@ class Store:
                     self._connection.execute("ROLLBACK")
                 raise
         return self.get_strategy(strategy_id)
+
+    def _promote_candidate_from_evaluation(
+        self,
+        candidate_id: str,
+        baseline_id: str,
+        *,
+        case_ids: list[str] | tuple[str, ...],
+        baseline_scores: list[float] | tuple[float, ...],
+        candidate_scores: list[float] | tuple[float, ...],
+        minimum_gain: float,
+        max_case_regression: float,
+    ) -> StoredStrategy:
+        """Atomically promote a candidate only when its per-case evaluation passes.
+
+        This internal API recomputes all aggregate quality gates and persists the
+        evidence and status change in one transaction. Application callers should
+        use EvolutionManager rather than changing statuses directly.
+        """
+        validate_identifier(candidate_id, "candidate_id")
+        validate_identifier(baseline_id, "baseline_id")
+        minimum_gain = validate_score(minimum_gain)
+        max_case_regression = validate_score(max_case_regression)
+        if isinstance(case_ids, (str, bytes)) or not isinstance(case_ids, (list, tuple)):
+            raise ValueError("case_ids must be a list/tuple")
+        if isinstance(baseline_scores, (str, bytes)) or not isinstance(baseline_scores, (list, tuple)):
+            raise ValueError("baseline_scores must be a list/tuple")
+        if isinstance(candidate_scores, (str, bytes)) or not isinstance(candidate_scores, (list, tuple)):
+            raise ValueError("candidate_scores must be a list/tuple")
+        if not 2 <= len(case_ids) <= 10_000:
+            raise ValueError("promotion requires 2-10,000 fixed evaluation cases")
+        if len(set(case_ids)) != len(case_ids):
+            raise ValueError("case_ids must be unique")
+        for case_id in case_ids:
+            validate_identifier(case_id, "case_id")
+        if len(baseline_scores) != len(case_ids) or len(candidate_scores) != len(case_ids):
+            raise ValueError("each evaluation case must have baseline and candidate scores")
+        base_values = [validate_score(value) for value in baseline_scores]
+        trial_values = [validate_score(value) for value in candidate_scores]
+        baseline_mean, candidate_mean = fmean(base_values), fmean(trial_values)
+        gain = candidate_mean - baseline_mean
+        case_regressions = [max(0.0, base - trial) for base, trial in zip(base_values, trial_values, strict=True)]
+        maximum_regression = max(case_regressions, default=0.0)
+        if gain < minimum_gain or maximum_regression > max_case_regression:
+            raise ValueError("candidate did not pass the promotion quality gate")
+
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                candidate = self._connection.execute(
+                    "SELECT task_type, status, parent_id FROM strategies WHERE strategy_id = ?",
+                    (candidate_id,),
+                ).fetchone()
+                if candidate is None:
+                    raise KeyError(f"unknown strategy: {candidate_id}")
+                if candidate["status"] != "candidate":
+                    raise ValueError("only a candidate strategy can be promoted")
+                baseline = self._connection.execute(
+                    "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
+                    (baseline_id,),
+                ).fetchone()
+                if baseline is None:
+                    raise KeyError(f"unknown baseline strategy: {baseline_id}")
+                if baseline["status"] != "active":
+                    raise ValueError("evaluation baseline must remain active")
+                if baseline["task_type"] != candidate["task_type"]:
+                    raise ValueError("baseline and candidate task_type must match")
+                if baseline_id == candidate_id:
+                    raise ValueError("candidate cannot be its own baseline")
+                self._connection.execute(
+                    "UPDATE strategies SET status = 'active' WHERE strategy_id = ? AND status = 'candidate'",
+                    (candidate_id,),
+                )
+                self.record_event(
+                    "strategy-status-changed",
+                    candidate["task_type"],
+                    {"strategy_id": candidate_id, "from": "candidate", "to": "active"},
+                )
+                event_payload = {
+                    "candidate_id": candidate_id,
+                    "baseline_id": baseline_id,
+                    "candidate_score": candidate_mean,
+                    "baseline_score": baseline_mean,
+                    "gain": gain,
+                    "minimum_gain": minimum_gain,
+                    "max_case_regression": maximum_regression,
+                    "max_case_regression_limit": max_case_regression,
+                    "cases": len(case_ids),
+                    "case_results": [
+                        {
+                            "case_id": case_id,
+                            "baseline_score": base,
+                            "candidate_score": trial,
+                            "regression": regression,
+                        }
+                        for case_id, base, trial, regression in zip(
+                            case_ids, base_values, trial_values, case_regressions, strict=True
+                        )
+                    ],
+                    "accepted": True,
+                    "reason": f"promoted: mean gain {gain:.3f}, max case regression {maximum_regression:.3f}",
+                }
+                self.record_event("candidate-promoted", candidate["task_type"], event_payload)
+                self._connection.execute("COMMIT")
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+        return self.get_strategy(candidate_id)
 
     def disable_strategy_with_fallback(self, strategy_id: str) -> StoredStrategy:
         """Atomically disable an active strategy only when another active fallback remains."""
