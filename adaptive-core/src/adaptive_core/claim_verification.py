@@ -9,9 +9,8 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
-from urllib.parse import urlparse
-
 from .models import validate_score
+from .source_safety import registered_publisher_domain, safe_https_source_url
 
 _ALLOWED_ASSESSMENTS = {
     "supports_claim",
@@ -19,12 +18,6 @@ _ALLOWED_ASSESSMENTS = {
     "mixed_evidence",
     "insufficient_evidence",
     "uncertain",
-}
-_COMPOUND_PUBLIC_SUFFIXES = {
-    "co.uk", "org.uk", "gov.uk", "ac.uk",
-    "com.au", "net.au", "org.au",
-    "co.nz", "org.nz",
-    "com.br", "com.cn", "com.sg", "co.jp",
 }
 _LIMITATION = (
     "A model-generated assessment is not an independently verified fact. "
@@ -50,35 +43,11 @@ class ClaimAssessmentBackend(Protocol):
 
 
 def _safe_https_url(value: Any) -> str | None:
-    if not isinstance(value, str) or not value or len(value) > 2_000:
-        return None
-    try:
-        parsed = urlparse(value)
-        # Reject userinfo, malformed hostnames, and URL forms outside the
-        # public HTTPS web-source contract.
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port is not None
-        ):
-            return None
-        host = parsed.hostname.lower().rstrip(".")
-        if not host or "." not in host:
-            return None
-        return value
-    except ValueError:
-        return None
+    return safe_https_source_url(value)
 
 
 def _publisher_domain(url: str) -> str:
-    host = urlparse(url).hostname.lower().rstrip(".")
-    labels = host.split(".")
-    last_two = ".".join(labels[-2:])
-    if len(labels) >= 3 and last_two in _COMPOUND_PUBLIC_SUFFIXES:
-        return ".".join(labels[-3:])
-    return last_two
+    return registered_publisher_domain(url)
 
 
 class ClaimVerificationEngine:
