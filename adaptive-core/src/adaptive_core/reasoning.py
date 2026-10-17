@@ -323,6 +323,31 @@ def _numeric_mentions_are_disjoint(first: Any, second: Any) -> bool:
         for right in valid_second
     )
 
+def _numeric_context_signature(text: Any, mention: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Capture nearby content words around a number, excluding the number itself."""
+    if not isinstance(text, str):
+        return None
+    start, end = mention.get("start"), mention.get("end")
+    if (
+        isinstance(start, bool) or not isinstance(start, int)
+        or isinstance(end, bool) or not isinstance(end, int)
+        or not 0 <= start < end <= len(text)
+    ):
+        return None
+
+    before: list[str] = []
+    after: list[str] = []
+    for match in re.finditer(r"[^\W_]+", text, flags=re.UNICODE):
+        token = match.group(0).casefold()
+        if len(token) <= 2 or token in _CLAIM_STOPWORDS or token.isdigit():
+            continue
+        normalized = _normalize_comparison_term(token)
+        if match.end() <= start:
+            before.append(normalized)
+        elif match.start() >= end:
+            after.append(normalized)
+    return tuple(before[-2:]), tuple(after[:2])
+
 @dataclass(frozen=True, slots=True)
 class EvidenceReview:
     query: str
@@ -550,6 +575,17 @@ class ReasoningEngine:
                             if first_number.get("kind") != second_number.get("kind"):
                                 continue
                             if first_number.get("value") == second_number.get("value"):
+                                continue
+                            first_context = _numeric_context_signature(first.get("text"), first_number)
+                            second_context = _numeric_context_signature(second.get("text"), second_number)
+                            # Multiple numbers in one sentence can describe distinct
+                            # events. Do not compare values attached to different
+                            # nearby predicates (e.g. opened year vs renovated year).
+                            if (
+                                first_context is not None
+                                and second_context is not None
+                                and first_context != second_context
+                            ):
                                 continue
                             number_kind = first_number.get("kind")
                             candidate_kind = (
