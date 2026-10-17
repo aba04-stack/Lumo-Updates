@@ -122,14 +122,19 @@ class AffectEngine:
                 samples = model["samples"]
                 if isinstance(samples, bool) or not isinstance(samples, int) or samples < 1:
                     continue
-                weights = [v for row in affect_weights.values() for v in row.values()] + list(reward_weights.values())
-                if any(not math.isfinite(v) or abs(v) > 1.0 for v in weights):
+                affect_values = [v for row in affect_weights.values() for v in row.values()]
+                if any(not math.isfinite(v) or abs(v) > _WEIGHT_LIMIT for v in affect_values):
+                    continue
+                if any(not math.isfinite(v) or abs(v) > 1.0 for v in reward_weights.values()):
+                    continue
+                last_error = float(model.get("last_prediction_error", 0.0))
+                if not math.isfinite(last_error) or abs(last_error) > 1.0:
                     continue
                 return {
                     "affect_weights": affect_weights,
                     "reward_weights": reward_weights,
                     "samples": samples,
-                    "last_prediction_error": float(model.get("last_prediction_error", 0.0)),
+                    "last_prediction_error": last_error,
                 }
             except (KeyError, TypeError, ValueError):
                 continue
