@@ -131,13 +131,33 @@ class EvolutionManager:
         if baseline.config.strategy_id == candidate_id:
             raise ValueError("candidate cannot be its own baseline")
 
-        case_list = list(cases)
+        if isinstance(cases, (str, bytes)):
+            return self._reject(candidate.config, baseline.config.strategy_id, "cases must be an iterable of EvaluationCase objects", 0)
+        case_list: list[EvaluationCase] = []
+        try:
+            for case in cases:
+                if len(case_list) >= 10_000:
+                    return self._reject(
+                        candidate.config, baseline.config.strategy_id,
+                        "evaluation is limited to 10,000 fixed cases", len(case_list),
+                    )
+                case_list.append(case)
+        except TypeError:
+            return self._reject(
+                candidate.config, baseline.config.strategy_id,
+                "cases must be an iterable of EvaluationCase objects", 0,
+            )
         if len(case_list) < self.minimum_cases:
             return self._reject(
                 candidate.config,
                 baseline.config.strategy_id,
                 f"need at least {self.minimum_cases} fixed evaluation cases",
-                0,
+                len(case_list),
+            )
+        if any(not isinstance(case, EvaluationCase) for case in case_list):
+            return self._reject(
+                candidate.config, baseline.config.strategy_id,
+                "all evaluation cases must be EvaluationCase objects", len(case_list),
             )
         if any(case.task_type != candidate.config.task_type for case in case_list):
             return self._reject(
@@ -176,10 +196,30 @@ class EvolutionManager:
         gain = candidate_mean - baseline_mean
         accepted = gain >= self.minimum_gain and max_regression <= self.max_case_regression
         if accepted:
-            # Compare-and-set prevents promotion if another process changed the state.
-            self.store.set_status(candidate_id, "active", expected_status="candidate")
-            reason = f"promoted: mean gain {gain:.3f}, max case regression {max_regression:.3f}"
-            event_type = "candidate-promoted"
+            try:
+                # Score aggregation, current-state comparison, activation and
+                # audit history are committed atomically by the storage layer.
+                promoted = self.store._promote_candidate_from_evaluation(
+                    candidate_id,
+                    baseline.config.strategy_id,
+                    case_ids=[case.case_id for case in case_list],
+                    baseline_scores=baseline_scores,
+                    candidate_scores=candidate_scores,
+                    minimum_gain=self.minimum_gain,
+                    max_case_regression=self.max_case_regression,
+                )
+                reason = f"promoted: mean gain {gain:.3f}, max case regression {max_regression:.3f}"
+            except Exception as exc:
+                reason = f"promotion failed closed ({type(exc).__name__})"
+                self.store.record_event(
+                    "candidate-evaluation-failed",
+                    candidate.config.task_type,
+                    {"candidate_id": candidate_id, "reason": reason},
+                )
+                return PromotionDecision(
+                    False, reason, candidate_id, baseline.config.strategy_id,
+                    candidate_mean, baseline_mean, len(case_list), max_regression
+                )
         else:
             parts = []
             if gain < self.minimum_gain:
@@ -189,22 +229,21 @@ class EvolutionManager:
                     f"max regression {max_regression:.3f} exceeds limit {self.max_case_regression:.3f}"
                 )
             reason = "; ".join(parts) or "quality gate rejected candidate"
-            event_type = "candidate-rejected"
-        self.store.record_event(
-            event_type,
-            candidate.config.task_type,
-            {
-                "candidate_id": candidate_id,
-                "baseline_id": baseline.config.strategy_id,
-                "candidate_score": candidate_mean,
-                "baseline_score": baseline_mean,
-                "gain": gain,
-                "max_case_regression": max_regression,
-                "cases": len(case_list),
-                "accepted": accepted,
-                "reason": reason,
-            },
-        )
+            self.store.record_event(
+                "candidate-rejected",
+                candidate.config.task_type,
+                {
+                    "candidate_id": candidate_id,
+                    "baseline_id": baseline.config.strategy_id,
+                    "candidate_score": candidate_mean,
+                    "baseline_score": baseline_mean,
+                    "gain": gain,
+                    "max_case_regression": max_regression,
+                    "cases": len(case_list),
+                    "accepted": False,
+                    "reason": reason,
+                },
+            )
         return PromotionDecision(
             accepted,
             reason,
