@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from statistics import fmean
 from typing import Any
 
@@ -12,6 +12,7 @@ from .models import EvaluationCase, PromotionDecision, StrategyConfig, validate_
 from .store import Store
 
 Evaluator = Callable[[StrategyConfig, EvaluationCase], float]
+Proposer = Callable[[StrategyConfig, Mapping[str, Any]], StrategyConfig]
 
 
 class EvolutionManager:
@@ -41,6 +42,77 @@ class EvolutionManager:
         self.minimum_gain = float(minimum_gain)
         self.max_case_regression = float(max_case_regression)
 
+    def propose_and_evaluate(
+        self,
+        task_type: str,
+        cases: Sequence[EvaluationCase],
+        *,
+        proposer: Proposer,
+        evaluator: Evaluator,
+    ) -> PromotionDecision:
+        """Ask an external proposer for a data-only revision, then gate it.
+
+        The proposer can be an LLM, an optimizer, or a deterministic function.
+        It receives aggregate performance, not raw user prompts or stored payloads.
+        A proposal never becomes active until evaluate_candidate accepts it.
+        """
+        baseline = self.core.choose_strategy(task_type)
+        recent = [
+            {"event_type": event["event_type"], "created_at": event["created_at"]}
+            for event in reversed(self.store.recent_events(limit=200))
+            if event["task_type"] == task_type
+        ][-20:]
+        feedback: dict[str, Any] = {
+            "task_type": task_type,
+            "strategy_performance": self.core.performance(task_type),
+            "recent_event_types": recent,
+            "guardrails": {
+                "minimum_gain": self.minimum_gain,
+                "max_case_regression": self.max_case_regression,
+                "minimum_cases": self.minimum_cases,
+                "source_code_execution": False,
+            },
+        }
+        try:
+            candidate_config = proposer(baseline.config, feedback)
+            if not isinstance(candidate_config, StrategyConfig):
+                raise TypeError("proposer must return a StrategyConfig")
+            if candidate_config.task_type != task_type:
+                raise ValueError("proposed task_type does not match the target task")
+            if candidate_config.version <= baseline.config.version:
+                raise ValueError("candidate version must be greater than its baseline version")
+            try:
+                self.store.get_strategy(candidate_config.strategy_id)
+            except KeyError:
+                pass
+            else:
+                raise ValueError("candidate strategy_id already exists; versions are immutable")
+        except Exception as exc:
+            self.store.record_event(
+                "candidate-proposal-failed",
+                task_type,
+                {
+                    "baseline_id": baseline.config.strategy_id,
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc)[:300],
+                },
+            )
+            raise
+
+        candidate = self.core.register_candidate(
+            candidate_config, parent_id=baseline.config.strategy_id
+        )
+        self.store.record_event(
+            "candidate-proposed",
+            task_type,
+            {
+                "candidate_id": candidate.config.strategy_id,
+                "baseline_id": baseline.config.strategy_id,
+                "version": candidate.config.version,
+            },
+        )
+        return self.evaluate_candidate(candidate.config.strategy_id, cases, evaluator)
+
     def evaluate_candidate(
         self,
         candidate_id: str,
@@ -50,7 +122,6 @@ class EvolutionManager:
         candidate = self.store.get_strategy(candidate_id)
         if candidate.status != "candidate":
             raise ValueError("only a candidate strategy can be evaluated for promotion")
-        active = self.store.list_strategies(candidate.config.task_type, status="active")
         if candidate.parent_id is not None:
             parent = self.store.get_strategy(candidate.parent_id)
             baseline = parent if parent.status == "active" else None
@@ -167,9 +238,13 @@ class EvolutionManager:
         self.store.record_event(
             "strategy-rollback",
             strategy.config.task_type,
-            {"disabled_strategy_id": strategy_id, "fallbacks": [
-                item.config.strategy_id for item in active if item.config.strategy_id != strategy_id
-            ]},
+            {
+                "disabled_strategy_id": strategy_id,
+                "fallbacks": [
+                    item.config.strategy_id for item in active
+                    if item.config.strategy_id != strategy_id
+                ],
+            },
         )
 
     def restore(self, strategy_id: str) -> None:
