@@ -204,3 +204,33 @@ def test_not_only_is_not_classified_as_negation() -> None:
     ])
     assert len(claims) == 1
     assert claims[0]["polarity"] == "affirmed"
+
+
+def test_evidence_review_rejects_malformed_urls_and_groups_publishers_consistently() -> None:
+    review = ReasoningEngine().review_documents("historical bridge", [
+        {
+            "title": "Unsafe credential URL",
+            "url": "https://name@example.org/fake",
+            "content": "The bridge opened in 1998.",
+        },
+        {
+            "title": "Local host",
+            "url": "https://127.0.0.1/bridge",
+            "content": "The bridge opened in 1998.",
+        },
+        {
+            "title": "Valid source",
+            "url": "https://archive-one.example.co.uk/bridge",
+            "content": "The bridge opened in 1998.",
+        },
+        {
+            "title": "Invalid empty source",
+            "url": "https://archive-two.example.co.uk/bridge",
+            "content": "   ",
+        },
+    ])
+    assert review.source_urls == ("https://archive-one.example.co.uk/bridge",)
+    assert review.publisher_domains == ("example.co.uk",)
+    assert review.status == "single_publisher_unverified"
+    assert len(review.extracted_claims) == 1
+    assert review.extracted_claims[0]["publisher_domain"] == "example.co.uk"
