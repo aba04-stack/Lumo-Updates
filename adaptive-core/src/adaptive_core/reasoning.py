@@ -546,7 +546,10 @@ class ReasoningEngine:
     def suggest_topics(self, documents: Iterable[dict[str, Any]], *, excluded: Iterable[str] = (), limit: int = 4) -> list[str]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10:
             raise ValueError("limit must be an integer from 1 to 10")
-        excluded_set = {entry.casefold().strip() for entry in excluded if isinstance(entry, str)}
+        if isinstance(excluded, (str, bytes)):
+            raise ValueError("excluded must be an iterable of topic strings, not a single string")
+        excluded_items = _collect_limited(excluded, 100, "excluded topics")
+        excluded_set = {entry.casefold().strip() for entry in excluded_items if isinstance(entry, str)}
         stopwords = {"что","это","как","для","при","или","так","его","ее","они","она","который","которая","которые","также","может","можно","более","менее","this","that","with","from","have","into","about","their","there","which","what","when","where","while","were","been","being","such","the","and","for","are","but","not","you","your","its","use","used"}
         candidates: dict[str, int] = {}
         for document_index, document in enumerate(documents):
