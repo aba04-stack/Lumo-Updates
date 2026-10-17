@@ -56,7 +56,7 @@ class AutonomousLearningLoop:
             if event["event_type"] == "autonomous-topic-queued":
                 topic = self._topic(payload)
                 if topic is not None:
-                    queued.append({"topic": topic, "priority": float(payload.get("priority", 0.5))})
+                    queued.append({"topic": topic, "priority": float(payload.get("priority", 0.5)), "reason": str(payload.get("reason", "curiosity"))})
             elif event["event_type"] == "autonomous-research-step":
                 topic = payload.get("topic")
                 if isinstance(topic, str) and topic:
@@ -73,9 +73,18 @@ class AutonomousLearningLoop:
             topic, key = item["topic"], item["topic"].casefold()
             if key in successful or key in session_attempted or attempts.get(key, 0) >= 2:
                 continue
-            score = item["priority"] + 0.15 * state.curiosity - 0.15 * state.frustration
+            score = item["priority"]
+            reason = item.get("reason", "curiosity")
+            # Curiosity favours newly discovered topics; frustration shifts attention away
+            # from repeated low-yield goals and toward another line of inquiry.
+            if reason == "derived_from_new_material":
+                score += 0.5 * state.curiosity
+            else:
+                score += 0.05 * state.curiosity
+            if reason in {"initial_research_goal", "revisit_existing_knowledge"}:
+                score -= 0.2 * state.frustration
             if attempts.get(key, 0):
-                score -= 0.2 * attempts[key]
+                score -= 0.2 * attempts[key] * (1.0 + state.frustration)
             candidates[topic] = max(candidates.get(topic, -1.0), score)
         return max(candidates, key=candidates.get) if candidates else None
 
@@ -108,6 +117,10 @@ class AutonomousLearningLoop:
         if query is None:
             return {"status": "idle", "reason": "no_unattempted_topics", "documents_found": 0}
         session_attempted.add(query.casefold())
+        prior_documents = self.cognitive.internet.recall("", limit=20)
+        known_terms: set[str] = set()
+        for prior in prior_documents:
+            known_terms.update(terms(str(prior.get("title", "")) + " " + str(prior.get("content", ""))))
         self.cognitive.affect.update("task-started", intensity=0.7)
         error, documents = None, []
         try:
@@ -120,7 +133,8 @@ class AutonomousLearningLoop:
         for document in documents:
             discovered_terms.update(terms(str(document.get("title", "")) + " " + str(document.get("content", ""))))
         discovered_terms -= terms(query)
-        information_gain = validate_score(min(1.0, 0.55 * min(len(documents), page_limit) / max(1, page_limit) + 0.02 * min(len(discovered_terms), 20)))
+        new_terms = discovered_terms - known_terms
+        information_gain = validate_score(min(1.0, 0.55 * min(len(documents), page_limit) / max(1, page_limit) + 0.02 * min(len(new_terms), 20)))
         next_topics = self._derive_topics(documents, query) if documents else []
         status = "source_found_unverified" if documents else "no_source_found"
         summary = f"Research query: {query}. Retrieved {len(documents)} page(s). Evidence status: {review.status}. Potential related terms: {', '.join(sorted(discovered_terms)[:12]) or 'none'}."
@@ -134,7 +148,7 @@ class AutonomousLearningLoop:
         self.store.record_event("autonomous-research-step", "autonomous-research", {
             "topic": query, "documents_found": len(documents), "sources": list(review.source_urls),
             "evidence_status": review.status, "retrieval_utility": information_gain,
-            "discovered_terms": sorted(discovered_terms)[:30], "suggested_topics": next_topics, "error": error,
+            "discovered_terms": sorted(discovered_terms)[:30], "new_terms": sorted(new_terms)[:30], "suggested_topics": next_topics, "error": error,
         })
         if documents:
             self.cognitive.affect.update("information-gain", intensity=information_gain)
@@ -146,7 +160,7 @@ class AutonomousLearningLoop:
             "status": status, "topic": query, "documents_found": len(documents),
             "source_urls": list(review.source_urls), "evidence_status": review.status,
             "relevant_excerpts": list(review.relevant_excerpts), "caveat": review.caveat,
-            "discovered_terms": sorted(discovered_terms)[:30], "next_topics": next_topics,
+            "discovered_terms": sorted(discovered_terms)[:30], "new_terms": sorted(new_terms)[:30], "next_topics": next_topics,
             "retrieval_utility": information_gain, "retrieval_utility_is_truth_score": False, "error": error,
         }
 

@@ -44,3 +44,15 @@ def test_autonomous_loop_rejects_unbounded_run_requests() -> None:
             assert "max_steps" in str(exc)
         else:
             raise AssertionError("unbounded request should be rejected")
+
+
+def test_curiosity_can_prefer_a_newly_discovered_topic() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        core.create_baseline("autonomous-research")
+        loop = CognitiveSystem(core, internet=FakeInternet()).autonomous_learning_loop(
+            topics=["initial-topic"]
+        )
+        loop.queue_topic("related-topic", priority=0.35, reason="derived_from_new_material")
+        # Under baseline affect, curiosity makes a newly discovered topic win.
+        assert loop._choose_topic(set()) == "related-topic"
