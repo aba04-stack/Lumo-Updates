@@ -66,12 +66,13 @@ class AutonomousLearningLoop:
         known = {value.casefold() for event in self._events() if event["event_type"] == "autonomous-topic-queued" if (value := self._topic(event["payload"])) is not None}
         if normalized.casefold() in known:
             return False
-        self.cognitive.motivation.add_goal(
-            normalized, drive=selected_drive, priority=priority, rationale=reason
-        )
-        self.store.record_event("autonomous-topic-queued", "autonomous-research", {
-            "topic": normalized, "priority": priority, "reason": reason, "drive": selected_drive
-        })
+        with self.store.transaction():
+            self.cognitive.motivation.add_goal(
+                normalized, drive=selected_drive, priority=priority, rationale=reason
+            )
+            self.store.record_event("autonomous-topic-queued", "autonomous-research", {
+                "topic": normalized, "priority": priority, "reason": reason, "drive": selected_drive
+            })
         return True
 
     def _history(self) -> tuple[list[dict[str, Any]], set[str], dict[str, int], set[str]]:
@@ -218,57 +219,61 @@ class AutonomousLearningLoop:
         next_topics = self._derive_topics(documents, query) if documents else []
         status = "source_found_unverified" if documents else "no_source_found"
         summary = f"Research query: {query}. Retrieved {len(documents)} page(s). Evidence status: {review.status}. Relevance coverage proxy: {relevance_coverage:.3f}. Potential related terms: {', '.join(sorted(discovered_terms)[:12]) or 'none'}."
-        self.cognitive.memory.remember(
-            "autonomous-research", summary, tags=["research", "internet", "source-review", review.status],
-            strategy_id=None, score=retrieval_utility, success=bool(documents),
-            metadata={
-                "query": query, "status": status, "sources": list(review.source_urls),
-                "publisher_domains": list(review.publisher_domains),
+        # Research memory, appraisal, drive state, goal status and step telemetry
+        # form one persistent unit. A failed final write must not leave an apparent
+        # completed research step with only some of its state committed.
+        with self.store.transaction():
+            self.cognitive.memory.remember(
+                "autonomous-research", summary, tags=["research", "internet", "source-review", review.status],
+                strategy_id=None, score=retrieval_utility, success=bool(documents),
+                metadata={
+                    "query": query, "status": status, "sources": list(review.source_urls),
+                    "publisher_domains": list(review.publisher_domains),
+                    "page_yield": page_yield, "relevance_coverage_proxy": relevance_coverage,
+                    "novelty_proxy": novelty_signal, "retrieval_utility": retrieval_utility,
+                    "retrieval_utility_is_truth_score": False,
+                    "claims_independently_verified": False,
+                    "claim_extraction_method": "sentence_heuristic_v1",
+                    "claim_candidates": claim_candidates,
+                    "potential_contradictions": contradiction_candidates,
+                    "contradiction_proxy": contradiction_signal,
+                    "suggested_topics": next_topics, "error": error,
+                },
+            )
+            # These are observable proxies, not a truth score. Since fetched pages are
+            # unverified, uncertainty remains high even when lexical coverage is strong.
+            uncertainty_signal = 1.0 if not documents else 1.0 - 0.35 * relevance_coverage
+            succeeded = bool(documents) and error is None
+            self.cognitive.affect.appraise(
+                succeeded=succeeded,
+                progress=retrieval_utility,
+                uncertainty=uncertainty_signal,
+                contradiction=contradiction_signal,
+                novelty=novelty_signal,
+                feedback=retrieval_utility if documents else -0.5,
+            )
+            drive_state = self.cognitive.motivation.update_outcome(
+                succeeded=succeeded,
+                progress=retrieval_utility,
+                uncertainty=uncertainty_signal,
+                contradiction=contradiction_signal,
+                novelty=novelty_signal,
+            )
+            # Completing a retrieval pass is not the same as verifying the research
+            # question. A separate verifier must mark a goal completed later.
+            goal = self.cognitive.motivation.set_goal_status(
+                goal.goal_id, "needs_verification" if documents else "deferred"
+            )
+            self.store.record_event("autonomous-research-step", "autonomous-research", {
+                "topic": query, "documents_found": len(documents), "sources": list(review.source_urls),
+                "evidence_status": review.status, "goal_status": goal.status,
+                "retrieval_utility": retrieval_utility,
                 "page_yield": page_yield, "relevance_coverage_proxy": relevance_coverage,
-                "novelty_proxy": novelty_signal, "retrieval_utility": retrieval_utility,
-                "retrieval_utility_is_truth_score": False,
+                "novelty_proxy": novelty_signal, "uncertainty_proxy": uncertainty_signal,
                 "claims_independently_verified": False,
-                "claim_extraction_method": "sentence_heuristic_v1",
-                "claim_candidates": claim_candidates,
-                "potential_contradictions": contradiction_candidates,
-                "contradiction_proxy": contradiction_signal,
-                "suggested_topics": next_topics, "error": error,
-            },
-        )
-        # These are observable proxies, not a truth score. Since fetched pages are
-        # unverified, uncertainty remains high even when lexical coverage is strong.
-        uncertainty_signal = 1.0 if not documents else 1.0 - 0.35 * relevance_coverage
-        succeeded = bool(documents) and error is None
-        self.cognitive.affect.appraise(
-            succeeded=succeeded,
-            progress=retrieval_utility,
-            uncertainty=uncertainty_signal,
-            contradiction=contradiction_signal,
-            novelty=novelty_signal,
-            feedback=retrieval_utility if documents else -0.5,
-        )
-        drive_state = self.cognitive.motivation.update_outcome(
-            succeeded=succeeded,
-            progress=retrieval_utility,
-            uncertainty=uncertainty_signal,
-            contradiction=contradiction_signal,
-            novelty=novelty_signal,
-        )
-        # Completing a retrieval pass is not the same as verifying the research
-        # question. A separate verifier must mark a goal completed later.
-        goal = self.cognitive.motivation.set_goal_status(
-            goal.goal_id, "needs_verification" if documents else "deferred"
-        )
-        self.store.record_event("autonomous-research-step", "autonomous-research", {
-            "topic": query, "documents_found": len(documents), "sources": list(review.source_urls),
-            "evidence_status": review.status, "goal_status": goal.status,
-            "retrieval_utility": retrieval_utility,
-            "page_yield": page_yield, "relevance_coverage_proxy": relevance_coverage,
-            "novelty_proxy": novelty_signal, "uncertainty_proxy": uncertainty_signal,
-            "claims_independently_verified": False,
-            "discovered_terms": sorted(discovered_terms)[:30],
-            "new_terms": sorted(new_terms)[:30], "suggested_topics": next_topics, "error": error,
-        })
+                "discovered_terms": sorted(discovered_terms)[:30],
+                "new_terms": sorted(new_terms)[:30], "suggested_topics": next_topics, "error": error,
+            })
         return {
             "status": status, "topic": query, "documents_found": len(documents),
             "source_urls": list(review.source_urls), "evidence_status": review.status,
