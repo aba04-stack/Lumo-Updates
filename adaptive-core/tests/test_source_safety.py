@@ -42,3 +42,9 @@ def test_publisher_identity_uses_known_compound_suffixes() -> None:
 def test_publisher_identity_rejects_unsafe_url() -> None:
     with pytest.raises(ValueError, match="public HTTPS"):
         registered_publisher_domain("http://example.org/article")
+
+
+def test_idna_and_punycode_variants_share_the_same_publisher_identity() -> None:
+    unicode_domain = registered_publisher_domain("https://bücher.example/article")
+    ascii_domain = registered_publisher_domain("https://xn--bcher-kva.example/other")
+    assert unicode_domain == ascii_domain == "xn--bcher-kva.example"
