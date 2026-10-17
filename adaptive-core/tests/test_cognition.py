@@ -199,8 +199,10 @@ def test_self_model_failure_history_survives_unrelated_event_noise() -> None:
         core.create_baseline("reasoning")
         cognitive = CognitiveSystem(core)
         store.record_event("task-execution-failed", "reasoning", {"error_type": "KnownFailure"})
+        # Another task's failures are in the same event streams and must not
+        # crowd this task's failure telemetry out of the bounded query.
         for index in range(250):
-            store.record_event("unrelated-noise", "another-task", {"index": index})
+            store.record_event("task-execution-failed", "another-task", {"index": index})
 
         report = cognitive.self_model.report("reasoning")
         assert "task-execution-failed" in report.recent_failure_events
