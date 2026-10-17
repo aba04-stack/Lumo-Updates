@@ -197,6 +197,6 @@ def test_web_knowledge_store_serializes_concurrent_writes_to_one_connection(tmp_
             saved = list(pool.map(save, range(16)))
 
         assert len(saved) == 16
-        recalled = store.search("parallel", limit=20)
+        recalled = store.search("source content", limit=20)
         assert len(recalled) == 16
         assert {item["url"] for item in recalled} == {item["url"] for item in saved}
