@@ -49,8 +49,18 @@ class AdaptiveCore:
             raise NoActiveStrategyError(f"No active strategy for task_type={task_type!r}")
         stats = self.store.stats(task_type)
         total = self.store.total_observations(task_type)
-        # Give each newly activated strategy a measured chance before ranking the field.
-        # An untried promoted version is tested instead of being hidden by stale baseline metrics.
+        # A newly promoted strategy gets an initial live trial if it has no live outcomes.
+        # Promotion is recorded only after passing the same-case quality gate.
+        active_by_id = {item.config.strategy_id: item for item in active}
+        for event in self.store.recent_events(limit=1000):
+            if event["task_type"] != task_type or event["event_type"] != "candidate-promoted":
+                continue
+            promoted_id = event["payload"].get("candidate_id")
+            if promoted_id in active_by_id and promoted_id not in stats:
+                return active_by_id[promoted_id]
+            break
+
+        # Otherwise explore any active strategy that has not yet seen live outcomes.
         unobserved = [strategy for strategy in active if strategy.config.strategy_id not in stats]
         if unobserved:
             return unobserved[-1]

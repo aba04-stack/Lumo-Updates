@@ -401,7 +401,7 @@ class Store:
             args.append(task_type)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY id DESC LIMIT 1000"
+        sql += " ORDER BY rowid DESC LIMIT 1000"
         with self._lock:
             rows = self._connection.execute(sql, args).fetchall()
         ranked: list[tuple[float, int, dict[str, Any]]] = []
