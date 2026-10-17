@@ -111,3 +111,92 @@ def test_api_errors_are_reported_without_saving_fake_knowledge(tmp_path) -> None
         learner.learn("some topic")
     assert learner.recall() == []
     learner.close()
+
+
+def test_malformed_search_payload_fails_closed(tmp_path) -> None:
+    learner = WikipediaLearner(tmp_path / "web.sqlite3")
+    learner._request_json = lambda language, params: {"query": []}
+    with pytest.raises(InternetLearningError, match="search-result structure"):
+        learner.learn("claim")
+    assert learner.recall() == []
+    learner.close()
+
+
+def test_malformed_search_entries_are_skipped_without_crashing(tmp_path) -> None:
+    learner = WikipediaLearner(tmp_path / "web.sqlite3")
+
+    def request_json(language, params):
+        if params.get("list") == "search":
+            return {
+                "query": {
+                    "search": [
+                        None,
+                        42,
+                        {"pageid": []},
+                        {"pageid": "../bad"},
+                        {"pageid": 42},
+                        {"pageid": "42"},
+                    ]
+                }
+            }
+        return {
+            "query": {
+                "pages": {
+                    "42": {
+                        "title": "Valid page",
+                        "fullurl": f"https://{language}.wikipedia.org/wiki/Valid_page",
+                        "extract": "This is a valid retrieved page with sufficient text.",
+                    }
+                }
+            }
+        }
+
+    learner._request_json = request_json
+    result = learner.learn("valid page", limit=4)
+    assert len(result) == 1
+    assert result[0]["title"] == "Valid page"
+    learner.close()
+
+
+def test_bad_language_types_timeout_and_url_values_fail_as_validation_errors(tmp_path) -> None:
+    with pytest.raises(ValueError, match="timeout"):
+        WikipediaLearner(tmp_path / "bad-timeout.sqlite3", timeout=True)
+
+    learner = WikipediaLearner(tmp_path / "web.sqlite3")
+    with pytest.raises(ValueError, match="unsupported language"):
+        learner.learn("topic", language=[])
+    with pytest.raises(ValueError, match="unsupported Wikipedia language"):
+        learner._request_json("../bad", {})
+    with WebKnowledgeStore(tmp_path / "web2.sqlite3") as store:
+        with pytest.raises(ValueError, match="source URL"):
+            store.save_document(
+                title="bad", url=None, language="ru", query="topic", content="some text"
+            )
+        with pytest.raises(ValueError, match="unsupported Wikipedia language"):
+            store.save_document(
+                title="bad", url="https://ru.wikipedia.org/wiki/Valid",
+                language=[], query="topic", content="some text",
+            )
+    learner.close()
+
+
+def test_web_knowledge_store_serializes_concurrent_writes_to_one_connection(tmp_path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    with WebKnowledgeStore(tmp_path / "parallel-web.sqlite3") as store:
+        def save(index: int):
+            return store.save_document(
+                title=f"Page {index}",
+                url=f"https://ru.wikipedia.org/wiki/Page_{index}",
+                language="ru",
+                query="parallel",
+                content=f"This is source content for distinct page number {index}.",
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            saved = list(pool.map(save, range(16)))
+
+        assert len(saved) == 16
+        recalled = store.search("parallel", limit=20)
+        assert len(recalled) == 16
+        assert {item["url"] for item in recalled} == {item["url"] for item in saved}
