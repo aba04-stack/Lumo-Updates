@@ -108,9 +108,7 @@ class AffectEngine:
         return min(_WEIGHT_LIMIT, max(-_WEIGHT_LIMIT, value))
 
     def _load_model(self) -> dict[str, Any]:
-        for event in self.store.recent_events(limit=10_000):
-            if event["event_type"] != "affect-model-trained":
-                continue
+        for event in self.store.events_of_types(["affect-model-trained"], limit=1000, newest_first=True):
             model = event["payload"].get("model")
             try:
                 affect_weights = {
@@ -153,8 +151,7 @@ class AffectEngine:
         }
 
     def state(self) -> AffectState:
-        for event in self.store.recent_events(limit=10_000):
-            if event["event_type"] == "affect-state-updated":
+        for event in self.store.events_of_types(["affect-state-updated"], limit=1000, newest_first=True):
                 payload = event["payload"].get("state", {})
                 try:
                     values = {name: validate_score(payload[name]) for name in _BASELINE}
