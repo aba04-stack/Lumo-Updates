@@ -60,8 +60,9 @@ class SelfModel:
             list(self.FAILURE_EVENTS),
             limit=self.history_window,
             newest_first=True,
+            task_type=task_type,
         ):
-            if event["task_type"] == task_type and event["event_type"] not in failures:
+            if event["event_type"] not in failures:
                 failures.append(event["event_type"])
         limits: list[str] = []
         if count < 5:
