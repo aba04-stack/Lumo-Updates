@@ -8,12 +8,12 @@ def test_symbolic_reasoning_records_trace_and_provenance() -> None:
     rules = [
         InferenceRule("rain-wets-ground", (("rain", "yes"),), ("ground", "wet"),
                       "Rain is modeled as wetting the ground.", 0.8),
-        InferenceRule("wet-ground-slippery", (("ground", "wet"),), ("ground", "slippery"),
+        InferenceRule("wet-ground-slippery", (("ground", "wet"),), ("hazard", "slippery"),
                       "A simplified risk heuristic.", 0.9),
     ]
     result = engine.forward_chain(facts, rules)
     values = {(fact.predicate, fact.value) for fact in result.facts}
-    assert ("ground", "wet") in values and ("ground", "slippery") in values
+    assert ("ground", "wet") in values and ("hazard", "slippery") in values
     assert len(result.trace) == 2
     slippery = next(fact for fact in result.facts if fact.value == "slippery")
     assert slippery.inferred_by == "wet-ground-slippery"
