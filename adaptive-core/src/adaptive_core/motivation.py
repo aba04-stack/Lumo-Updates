@@ -27,11 +27,12 @@ _BASELINE = {
     "progress": 0.50,
     "uncertainty_reduction": 0.45,
 }
-_GOAL_STATUSES = {"queued", "active", "completed", "deferred"}
+_GOAL_STATUSES = {"queued", "active", "needs_verification", "completed", "deferred"}
 _TRANSITIONS = {
-    "queued": {"active", "completed", "deferred"},
-    "active": {"queued", "completed", "deferred"},
-    "deferred": {"queued", "active", "completed"},
+    "queued": {"active", "deferred"},
+    "active": {"queued", "needs_verification", "completed", "deferred"},
+    "needs_verification": {"active", "completed", "deferred"},
+    "deferred": {"queued", "active", "needs_verification"},
     "completed": set(),
 }
 _REASON_DRIVE = {
@@ -87,17 +88,17 @@ class MotivationEngine:
         return self.store.recent_events(limit=10_000)
 
     def state(self) -> DriveState:
-        for event in self._events():
-            if event["event_type"] != "motivation-state-updated":
-                continue
-            payload = event["payload"].get("state", {})
-            try:
-                values = {name: validate_score(payload[name]) for name in _DRIVES}
-                updated_at = payload.get("updated_at", event["created_at"])
-                if isinstance(updated_at, str):
-                    return DriveState(**values, updated_at=updated_at)
-            except (KeyError, ValueError):
-                continue
+        event = self.store.latest_event("motivation-state-updated")
+        if event is None:
+            return DriveState()
+        payload = event["payload"].get("state", {})
+        try:
+            values = {name: validate_score(payload[name]) for name in _DRIVES}
+            updated_at = payload.get("updated_at", event["created_at"])
+            if isinstance(updated_at, str):
+                return DriveState(**values, updated_at=updated_at)
+        except (KeyError, ValueError):
+            pass
         return DriveState()
 
     def update_outcome(
@@ -156,7 +157,12 @@ class MotivationEngine:
         if status is not None and status not in _GOAL_STATUSES:
             raise ValueError(f"unsupported goal status: {status}")
         records: dict[str, dict[str, Any]] = {}
-        for event in reversed(self._events()):
+        events = self.store.events_of_types(
+            ["motivation-goal-created", "motivation-goal-status"],
+            limit=None,
+            newest_first=False,
+        )
+        for event in events:
             payload = event["payload"]
             kind = event["event_type"]
             if kind == "motivation-goal-created":
