@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -30,8 +31,8 @@ _BASELINE = {
 _GOAL_STATUSES = {"queued", "active", "needs_verification", "completed", "deferred"}
 _TRANSITIONS = {
     "queued": {"active", "deferred"},
-    "active": {"queued", "needs_verification", "completed", "deferred"},
-    "needs_verification": {"active", "completed", "deferred"},
+    "active": {"queued", "needs_verification", "deferred"},
+    "needs_verification": {"active", "deferred"},
     "deferred": {"queued", "active", "needs_verification"},
     "completed": set(),
 }
@@ -162,6 +163,7 @@ class MotivationEngine:
             limit=None,
             newest_first=False,
         )
+        verification_records: dict[str, str] = {}
         for event in events:
             payload = event["payload"]
             kind = event["event_type"]
@@ -179,10 +181,40 @@ class MotivationEngine:
                     "created_at": event["created_at"],
                     "updated_at": event["created_at"],
                 })
+            elif kind == "motivation-goal-verification-recorded":
+                goal_id, verification_id = payload.get("goal_id"), payload.get("verification_id")
+                if (
+                    isinstance(goal_id, str)
+                    and goal_id in records
+                    and isinstance(verification_id, str)
+                    and payload.get("method") in {"manual_review", "deterministic_test", "formal_proof"}
+                    and isinstance(payload.get("reviewer"), str)
+                    and isinstance(payload.get("criteria"), list) and payload["criteria"]
+                    and isinstance(payload.get("evidence_refs"), list) and payload["evidence_refs"]
+                ):
+                    verification_records[verification_id] = goal_id
             elif kind == "motivation-goal-status":
-                goal_id = payload.get("goal_id")
-                if goal_id in records and payload.get("status") in _GOAL_STATUSES:
-                    records[goal_id]["status"] = payload["status"]
+                goal_id, requested = payload.get("goal_id"), payload.get("status")
+                if goal_id not in records or requested not in _GOAL_STATUSES:
+                    continue
+                current = records[goal_id]["status"]
+                if requested == current:
+                    continue
+                # Replay the same transition constraints as the public API. A raw
+                # status event cannot bypass them by being written to the event log.
+                if payload.get("from") != current:
+                    continue
+                if requested == "completed":
+                    verification_id = payload.get("verification_id")
+                    allowed = (
+                        current == "needs_verification"
+                        and isinstance(verification_id, str)
+                        and verification_records.get(verification_id) == goal_id
+                    )
+                else:
+                    allowed = requested in _TRANSITIONS.get(current, set())
+                if allowed:
+                    records[goal_id]["status"] = requested
                     records[goal_id]["updated_at"] = event["created_at"]
         result: list[MotivationalGoal] = []
         for item in records.values():
@@ -230,11 +262,79 @@ class MotivationEngine:
         })
         return next(goal for goal in self.goals() if goal.goal_id == goal_id)
 
+    def complete_goal(
+        self,
+        goal_id: str,
+        *,
+        method: str,
+        reviewer: str,
+        criteria: list[str] | tuple[str, ...],
+        evidence_refs: list[str] | tuple[str, ...],
+    ) -> MotivationalGoal:
+        """Complete a goal only with an explicit, auditable verification record.
+
+        This records that a named reviewer/process checked the listed criteria
+        against the supplied references. It does not authenticate that reviewer
+        or independently prove that a cited source is true.
+        """
+        goal = next((item for item in self.goals() if item.goal_id == goal_id), None)
+        if goal is None:
+            raise KeyError(f"unknown goal: {goal_id}")
+        if goal.status != "needs_verification":
+            raise ValueError("goal must be in needs_verification before completion")
+        if method not in {"manual_review", "deterministic_test", "formal_proof"}:
+            raise ValueError("method must be manual_review, deterministic_test, or formal_proof")
+        if not isinstance(reviewer, str) or not reviewer.strip() or len(reviewer.strip()) > 128:
+            raise ValueError("reviewer must contain 1-128 characters")
+        if isinstance(criteria, str) or not isinstance(criteria, (list, tuple)) or not 1 <= len(criteria) <= 20:
+            raise ValueError("criteria must contain 1-20 explicit review criteria")
+        normalized_criteria: list[str] = []
+        for criterion in criteria:
+            if not isinstance(criterion, str) or not criterion.strip() or len(criterion.strip()) > 300:
+                raise ValueError("each criterion must contain 1-300 characters")
+            normalized_criteria.append(criterion.strip())
+        if isinstance(evidence_refs, str) or not isinstance(evidence_refs, (list, tuple)) or not 1 <= len(evidence_refs) <= 20:
+            raise ValueError("evidence_refs must contain 1-20 references")
+        normalized_refs: list[str] = []
+        for reference in evidence_refs:
+            if not isinstance(reference, str) or not reference.strip() or len(reference.strip()) > 2_000:
+                raise ValueError("each evidence reference must contain 1-2,000 characters")
+            normalized_refs.append(reference.strip())
+        # Avoid storing duplicate sources/criteria without discarding their order.
+        normalized_criteria = list(dict.fromkeys(normalized_criteria))
+        normalized_refs = list(dict.fromkeys(normalized_refs))
+        verification_id = "verification-" + uuid.uuid4().hex
+        self.store.record_event("motivation-goal-verification-recorded", "motivation", {
+            "goal_id": goal_id,
+            "verification_id": verification_id,
+            "method": method,
+            "reviewer": reviewer.strip(),
+            "criteria": normalized_criteria,
+            "evidence_refs": normalized_refs,
+            "claim_verified": False,
+            "reviewer_authenticated": False,
+            "meaning": "An auditable review record, not independent proof of truth.",
+        })
+        # A failure between these two writes leaves the goal uncompleted; replay
+        # ignores a completion without a matching verification record.
+        self.store.record_event("motivation-goal-status", "motivation", {
+            "goal_id": goal_id,
+            "from": goal.status,
+            "status": "completed",
+            "verification_id": verification_id,
+        })
+        return next(item for item in self.goals() if item.goal_id == goal_id)
+
     def set_goal_status(self, goal_id: str, status: str) -> MotivationalGoal:
         if not isinstance(goal_id, str) or not goal_id:
             raise ValueError("goal_id must be non-empty")
         if status not in _GOAL_STATUSES:
             raise ValueError(f"unsupported goal status: {status}")
+        if status == "completed":
+            existing_completed = next((goal for goal in self.goals() if goal.goal_id == goal_id), None)
+            if existing_completed is not None and existing_completed.status == "completed":
+                return existing_completed
+            raise ValueError("use complete_goal() with an explicit verification record")
         existing = next((goal for goal in self.goals() if goal.goal_id == goal_id), None)
         if existing is None:
             raise KeyError(f"unknown goal: {goal_id}")
