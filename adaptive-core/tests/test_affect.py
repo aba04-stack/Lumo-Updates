@@ -82,3 +82,17 @@ def test_outcome_feedback_must_be_finite_and_bounded() -> None:
             affect.appraise(succeeded=False, feedback=float("nan"))
         with pytest.raises(ValueError, match="reward"):
             affect.learn_from_outcome(features={"progress": 0.5}, reward=2.0)
+
+def test_reward_predictor_remains_bounded_during_repeated_learning() -> None:
+    with Store(":memory:") as store:
+        affect = AffectEngine(store)
+        features = {
+            "novelty": 1.0,
+            "progress": 1.0,
+            "uncertainty": 1.0,
+            "contradiction": 1.0,
+        }
+        for _ in range(30):
+            result = affect.learn_from_outcome(features=features, reward=1.0)
+            assert -1.0 <= result["predicted_reward"] <= 1.0
+            assert -1.0 <= result["prediction_error"] <= 1.0
