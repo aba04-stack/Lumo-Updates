@@ -134,3 +134,14 @@ def test_malformed_event_payloads_are_normalized_before_returning() -> None:
         event = store.recent_events(limit=1)[0]
         assert event["payload"]["_invalid_payload"] is True
         assert event["payload"]["_payload_error"] == "payload_not_object"
+
+
+def test_appraisal_rejects_malformed_or_unknown_feature_inputs() -> None:
+    with Store(":memory:") as store:
+        engine = AffectEngine(store)
+        with pytest.raises(ValueError, match="features must be a mapping"):
+            engine.learn_from_outcome(features=[], reward=0.5)
+        with pytest.raises(ValueError, match="unsupported appraisal features"):
+            engine.learn_from_outcome(features={"novelty": 0.5, "surprise": 1.0}, reward=0.5)
+        with pytest.raises(ValueError, match="unsupported appraisal event"):
+            engine.update([])
