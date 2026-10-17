@@ -116,6 +116,14 @@ _CLAIM_STOPWORDS = {
     "граммов", "грамм", "килограммов", "килограмм", "процентов", "процент",
     "часов", "часа", "час", "минут", "минута", "минуты", "секунд", "секунда", "секунды",
     "дней", "день", "дня", "лет", "год", "года", "миллионов", "миллион", "миллиарда", "миллиард",
+    "ноль", "нуль", "один", "одна", "одно", "одну", "одного", "одной", "одном", "одним",
+    "два", "две", "двух", "двум", "двумя",
+    "три", "трёх", "трех", "трем", "трём", "тремя",
+    "четыре", "четырёх", "четырех", "четырем", "четырём", "четырьмя",
+    "пять", "пяти", "пятью", "шесть", "шести", "шестью", "семь", "семи", "семью",
+    "восемь", "восьми", "восемью", "девять", "девяти", "девятью",
+    "десять", "десяти", "десятью", "одиннадцать", "одиннадцати",
+    "двенадцать", "двенадцати",
 }
 _NEGATION_PATTERNS = (
     r"\bnot\b", r"\bno\b", r"\bnever\b", r"\bwithout\b", r"\bcannot\b",
@@ -159,7 +167,16 @@ def _claim_comparison_terms(text: str) -> set[str]:
 
 _NUMERIC_PATTERN = re.compile(
     r"(?<![\w])(?P<number>\d{1,3}(?:[ ,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?|"
-    r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"одиннадцати|двенадцати|одиннадцать|двенадцать|"
+    r"четырёх|четырех|четырём|четырем|четырьмя|"
+    r"восемью|восьми|двумя|двух|двум|"
+    r"трёх|трех|трём|трем|тремя|"
+    r"одного|одной|одном|одним|одну|"
+    r"девятью|девяти|десятью|десяти|пятью|шестью|семью|"
+    r"восемь|девять|четыре|одиннадцать|двенадцать|"
+    r"шесть|семь|пять|три|два|две|ноль|нуль|"
+    r"десять|один|одна|одно)"
     r"\s*(?P<unit>%|percent(?:age)?|per\s+cent|km|kilometers?|kilometres?|"
     r"miles?|meters?|metres?|kg|kilograms?|g|grams?|mg|milligrams?|"
     r"°\s*[cf]|celsius|fahrenheit|hours?|minutes?|seconds?|days?|years?|"
@@ -214,18 +231,35 @@ def _decimal_value(raw: str) -> str | None:
         return None
     return format(value.normalize(), "f")
 
+_CARDINAL_WORD_VALUES = {
+    "zero": "0", "one": "1", "two": "2", "three": "3",
+    "four": "4", "five": "5", "six": "6", "seven": "7",
+    "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
+    "twelve": "12",
+    "ноль": "0", "нуль": "0",
+    "один": "1", "одна": "1", "одно": "1", "одну": "1",
+    "одного": "1", "одной": "1", "одном": "1", "одним": "1",
+    "два": "2", "две": "2", "двух": "2", "двум": "2", "двумя": "2",
+    "три": "3", "трёх": "3", "трех": "3", "трем": "3", "трём": "3", "тремя": "3",
+    "четыре": "4", "четырёх": "4", "четырех": "4", "четырем": "4",
+    "четырём": "4", "четырьмя": "4",
+    "пять": "5", "пяти": "5", "пятью": "5",
+    "шесть": "6", "шести": "6", "шестью": "6",
+    "семь": "7", "семи": "7", "семью": "7",
+    "восемь": "8", "восьми": "8", "восемью": "8",
+    "девять": "9", "девяти": "9", "девятью": "9",
+    "десять": "10", "десяти": "10", "десятью": "10",
+    "одиннадцать": "11", "одиннадцати": "11",
+    "двенадцать": "12", "двенадцати": "12",
+}
+
+
 def _extract_numeric_mentions(text: str) -> list[dict[str, Any]]:
     """Extract auditable numeric/date-like spans; do not infer their meaning."""
     mentions: list[dict[str, Any]] = []
     for match in _NUMERIC_PATTERN.finditer(text):
         raw = match.group("number")
-        word_values = {
-            "zero": "0", "one": "1", "two": "2", "three": "3",
-            "four": "4", "five": "5", "six": "6", "seven": "7",
-            "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
-            "twelve": "12",
-        }
-        numeric_value = word_values.get(raw.casefold()) or _decimal_value(raw)
+        numeric_value = _CARDINAL_WORD_VALUES.get(raw.casefold()) or _decimal_value(raw)
         if numeric_value is None:
             continue
         raw_unit = (match.group("unit") or "").casefold()
