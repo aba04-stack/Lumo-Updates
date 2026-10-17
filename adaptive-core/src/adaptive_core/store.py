@@ -27,7 +27,7 @@ def _utc_now() -> str:
 
 def _json_dump(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False, default=str)
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError("value must be JSON-serializable") from exc
 
@@ -133,9 +133,13 @@ class Store:
         status: str = "candidate",
         parent_id: str | None = None,
     ) -> StoredStrategy:
-        if status not in {"candidate", "active"}:
+        if not isinstance(config, StrategyConfig):
+            raise TypeError("config must be a StrategyConfig")
+        if not isinstance(status, str) or status not in {"candidate", "active"}:
             raise ValueError("new strategies must start as candidate or active")
         if parent_id is not None:
+            if not isinstance(parent_id, str) or not parent_id:
+                raise ValueError("parent_id must be a non-empty string or None")
             parent = self.get_strategy(parent_id)
             if parent.config.task_type != config.task_type:
                 raise ValueError("parent and child strategies must have the same task_type")
@@ -161,18 +165,21 @@ class Store:
                         created_at,
                     ),
                 )
+                # Keep the strategy row and its audit event in one transaction.
+                self.record_event(
+                    "strategy-created",
+                    config.task_type,
+                    {"strategy_id": config.strategy_id, "status": status, "parent_id": parent_id},
+                )
                 self._connection.execute("COMMIT")
             except sqlite3.IntegrityError as exc:
-                self._connection.execute("ROLLBACK")
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
                 raise ValueError(f"strategy could not be inserted: {exc}") from exc
             except Exception:
-                self._connection.execute("ROLLBACK")
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
                 raise
-        self.record_event(
-            "strategy-created",
-            config.task_type,
-            {"strategy_id": config.strategy_id, "status": status, "parent_id": parent_id},
-        )
         return self.get_strategy(config.strategy_id)
 
     def get_strategy(self, strategy_id: str) -> StoredStrategy:
@@ -206,8 +213,12 @@ class Store:
         *,
         expected_status: str | None = None,
     ) -> StoredStrategy:
-        if new_status not in _STATUSES:
+        if not isinstance(strategy_id, str) or not strategy_id:
+            raise ValueError("strategy_id must be a non-empty string")
+        if not isinstance(new_status, str) or new_status not in _STATUSES:
             raise ValueError(f"unsupported status: {new_status}")
+        if expected_status is not None and (not isinstance(expected_status, str) or expected_status not in _STATUSES):
+            raise ValueError("expected_status must be a supported status or None")
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
@@ -224,21 +235,77 @@ class Store:
                     )
                 if old_status != new_status and new_status not in _TRANSITIONS[old_status]:
                     raise ValueError(f"invalid status transition: {old_status} -> {new_status}")
+                if old_status == "active" and new_status == "disabled":
+                    remaining = self._connection.execute(
+                        "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
+                        (row["task_type"],),
+                    ).fetchone()["n"]
+                    if int(remaining) <= 1:
+                        raise ValueError("cannot disable the last active strategy; no safe fallback would remain")
                 if old_status != new_status:
                     self._connection.execute(
                         "UPDATE strategies SET status = ? WHERE strategy_id = ?",
                         (new_status, strategy_id),
                     )
+                    # Keep the state transition and audit event in the same transaction.
+                    self.record_event(
+                        "strategy-status-changed",
+                        row["task_type"],
+                        {"strategy_id": strategy_id, "from": old_status, "to": new_status},
+                    )
                 self._connection.execute("COMMIT")
             except Exception:
-                self._connection.execute("ROLLBACK")
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
                 raise
-        if old_status != new_status:
-            self.record_event(
-                "strategy-status-changed",
-                row["task_type"],
-                {"strategy_id": strategy_id, "from": old_status, "to": new_status},
-            )
+        return self.get_strategy(strategy_id)
+
+    def disable_strategy_with_fallback(self, strategy_id: str) -> StoredStrategy:
+        """Atomically disable an active strategy only when another active fallback remains."""
+        if not isinstance(strategy_id, str) or not strategy_id:
+            raise ValueError("strategy_id must be a non-empty string")
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
+                    (strategy_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"unknown strategy: {strategy_id}")
+                if row["status"] != "active":
+                    raise ValueError("only an active strategy can be rolled back")
+                remaining = self._connection.execute(
+                    "SELECT COUNT(*) AS n FROM strategies WHERE task_type = ? AND status = 'active'",
+                    (row["task_type"],),
+                ).fetchone()["n"]
+                if int(remaining) <= 1:
+                    raise ValueError("cannot disable the last active strategy; no safe fallback would remain")
+                self._connection.execute(
+                    "UPDATE strategies SET status = 'disabled' WHERE strategy_id = ? AND status = 'active'",
+                    (strategy_id,),
+                )
+                self.record_event(
+                    "strategy-status-changed", row["task_type"],
+                    {"strategy_id": strategy_id, "from": "active", "to": "disabled"},
+                )
+                self.record_event(
+                    "strategy-rollback", row["task_type"],
+                    {
+                        "disabled_strategy_id": strategy_id,
+                        "fallbacks": [
+                            item["strategy_id"] for item in self._connection.execute(
+                                "SELECT strategy_id FROM strategies WHERE task_type = ? AND status = 'active' ORDER BY strategy_id",
+                                (row["task_type"],),
+                            ).fetchall()
+                        ],
+                    },
+                )
+                self._connection.execute("COMMIT")
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
         return self.get_strategy(strategy_id)
 
     def record_outcome(
@@ -249,25 +316,44 @@ class Store:
         success: bool,
         metadata: dict[str, Any] | None = None,
     ) -> int:
+        validate_identifier(task_type, "task_type")
+        if not isinstance(strategy_id, str) or not strategy_id:
+            raise ValueError("strategy_id must be a non-empty string")
         score = validate_score(score)
         if not isinstance(success, bool):
             raise ValueError("success must be a bool")
-        strategy = self.get_strategy(strategy_id)
-        if strategy.config.task_type != task_type:
-            raise ValueError("task_type does not match the strategy")
-        if strategy.status != "active":
-            raise ValueError("only active strategies may influence live adaptation")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("metadata must be a dictionary or None")
         metadata_json = _json_dump(metadata or {})
         with self._lock:
-            cursor = self._connection.execute(
-                """
-                INSERT INTO observations
-                (task_type, strategy_id, score, success, metadata_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (task_type, strategy_id, score, int(success), metadata_json, _utc_now()),
-            )
-            observation_id = int(cursor.lastrowid)
+            try:
+                # Serialize status-check and observation insertion. A strategy
+                # cannot be disabled between validation and recording feedback.
+                self._connection.execute("BEGIN IMMEDIATE")
+                strategy = self._connection.execute(
+                    "SELECT task_type, status FROM strategies WHERE strategy_id = ?",
+                    (strategy_id,),
+                ).fetchone()
+                if strategy is None:
+                    raise KeyError(f"unknown strategy: {strategy_id}")
+                if strategy["task_type"] != task_type:
+                    raise ValueError("task_type does not match the strategy")
+                if strategy["status"] != "active":
+                    raise ValueError("only active strategies may influence live adaptation")
+                cursor = self._connection.execute(
+                    """
+                    INSERT INTO observations
+                    (task_type, strategy_id, score, success, metadata_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (task_type, strategy_id, score, int(success), metadata_json, _utc_now()),
+                )
+                observation_id = int(cursor.lastrowid)
+                self._connection.execute("COMMIT")
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
         return observation_id
 
     def stats(self, task_type: str) -> dict[str, dict[str, float]]:
@@ -301,13 +387,20 @@ class Store:
     def record_event(
         self, event_type: str, task_type: str | None, payload: dict[str, Any]
     ) -> None:
-        if not event_type or len(event_type) > 128:
+        if not isinstance(event_type, str) or not event_type.strip() or len(event_type) > 128:
             raise ValueError("event_type must contain 1-128 characters")
+        if task_type is not None and (
+            not isinstance(task_type, str) or not task_type.strip() or len(task_type) > 128
+        ):
+            raise ValueError("task_type must be a non-empty string of at most 128 characters or None")
+        if not isinstance(payload, dict):
+            raise ValueError("event payload must be a dictionary")
+        payload_json = _json_dump(payload)
         with self._lock:
             self._connection.execute(
                 "INSERT INTO events(event_type, task_type, payload_json, created_at) "
                 "VALUES (?, ?, ?, ?)",
-                (event_type, task_type, _json_dump(payload), _utc_now()),
+                (event_type.strip(), task_type, payload_json, _utc_now()),
             )
 
     def remember_episode(
