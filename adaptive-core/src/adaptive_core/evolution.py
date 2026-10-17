@@ -228,24 +228,9 @@ class EvolutionManager:
         return PromotionDecision(False, reason, candidate.strategy_id, baseline_id, None, None, cases, None)
 
     def rollback(self, strategy_id: str) -> None:
-        strategy = self.store.get_strategy(strategy_id)
-        if strategy.status != "active":
-            raise ValueError("only an active strategy can be rolled back")
-        active = self.store.list_strategies(strategy.config.task_type, status="active")
-        if len(active) <= 1:
-            raise ValueError("cannot disable the last active strategy; no safe fallback would remain")
-        self.store.set_status(strategy_id, "disabled", expected_status="active")
-        self.store.record_event(
-            "strategy-rollback",
-            strategy.config.task_type,
-            {
-                "disabled_strategy_id": strategy_id,
-                "fallbacks": [
-                    item.config.strategy_id for item in active
-                    if item.config.strategy_id != strategy_id
-                ],
-            },
-        )
+        # The active-count check and disable operation must occur in one SQLite
+        # transaction; separate checks could race and disable every fallback.
+        self.store.disable_strategy_with_fallback(strategy_id)
 
     def restore(self, strategy_id: str) -> None:
         strategy = self.store.get_strategy(strategy_id)
