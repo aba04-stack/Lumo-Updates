@@ -98,18 +98,21 @@ class EvolutionManager:
             )
             raise
 
-        candidate = self.core.register_candidate(
-            candidate_config, parent_id=baseline.config.strategy_id
-        )
-        self.store.record_event(
-            "candidate-proposed",
-            task_type,
-            {
-                "candidate_id": candidate.config.strategy_id,
-                "baseline_id": baseline.config.strategy_id,
-                "version": candidate.config.version,
-            },
-        )
+        # Candidate row, strategy-created event and proposal event are one
+        # transaction; failed audit recording must not leave an orphan candidate.
+        with self.store.transaction():
+            candidate = self.core.register_candidate(
+                candidate_config, parent_id=baseline.config.strategy_id
+            )
+            self.store.record_event(
+                "candidate-proposed",
+                task_type,
+                {
+                    "candidate_id": candidate.config.strategy_id,
+                    "baseline_id": baseline.config.strategy_id,
+                    "version": candidate.config.version,
+                },
+            )
         return self.evaluate_candidate(candidate.config.strategy_id, cases, evaluator)
 
     def evaluate_candidate(
@@ -274,9 +277,10 @@ class EvolutionManager:
         strategy = self.store.get_strategy(strategy_id)
         if strategy.status != "disabled":
             raise ValueError("only a disabled strategy can be restored")
-        self.store.set_status(strategy_id, "active", expected_status="disabled")
-        self.store.record_event(
-            "strategy-restored",
-            strategy.config.task_type,
-            {"strategy_id": strategy_id},
-        )
+        with self.store.transaction():
+            self.store.set_status(strategy_id, "active", expected_status="disabled")
+            self.store.record_event(
+                "strategy-restored",
+                strategy.config.task_type,
+                {"strategy_id": strategy_id},
+            )
