@@ -49,8 +49,13 @@ class AdaptiveCore:
             raise NoActiveStrategyError(f"No active strategy for task_type={task_type!r}")
         stats = self.store.stats(task_type)
         total = self.store.total_observations(task_type)
+        # Give each newly activated strategy a measured chance before ranking the field.
+        # An untried promoted version is tested instead of being hidden by stale baseline metrics.
+        unobserved = [strategy for strategy in active if strategy.config.strategy_id not in stats]
+        if unobserved:
+            return unobserved[-1]
         if total == 0:
-            return active[0]
+            return active[-1]
 
         def upper_confidence(strategy: StoredStrategy) -> float:
             observed = stats.get(strategy.config.strategy_id)

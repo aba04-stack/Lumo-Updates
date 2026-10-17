@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import StoredStrategy, StrategyConfig, validate_score
+from .models import StoredStrategy, StrategyConfig, validate_identifier, validate_score
 
 
 _STATUSES = {"candidate", "active", "disabled"}
@@ -81,6 +82,19 @@ class Store:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS episodes (
+                    episode_id TEXT PRIMARY KEY,
+                    task_type TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    strategy_id TEXT REFERENCES strategies(strategy_id),
+                    score REAL NOT NULL CHECK(score >= 0 AND score <= 1),
+                    success INTEGER NOT NULL CHECK(success IN (0, 1)),
+                    metadata_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_episodes_task_time
+                    ON episodes(task_type, created_at);
                 """
             )
 
@@ -294,6 +308,121 @@ class Store:
                 "VALUES (?, ?, ?, ?)",
                 (event_type, task_type, _json_dump(payload), _utc_now()),
             )
+
+    def remember_episode(
+        self, episode_id: str, task_type: str, summary: str, *,
+        tags: list[str] | tuple[str, ...] = (), strategy_id: str | None = None,
+        score: float, success: bool, metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Persist a bounded experience summary; raw inputs are intentionally not required."""
+        validate_identifier(episode_id, "episode_id")
+        validate_identifier(task_type, "task_type")
+        if not isinstance(summary, str) or not summary.strip() or len(summary) > 10_000:
+            raise ValueError("summary must contain 1-10,000 characters")
+        score = validate_score(score)
+        if not isinstance(success, bool):
+            raise ValueError("success must be a bool")
+        if isinstance(tags, str) or not isinstance(tags, (list, tuple)) or len(tags) > 32:
+            raise ValueError("tags must be a list/tuple of at most 32 strings")
+        normalized_tags: list[str] = []
+        seen_tags: set[str] = set()
+        for tag in tags:
+            if not isinstance(tag, str) or not tag.strip() or len(tag) > 64:
+                raise ValueError("each tag must contain 1-64 characters")
+            normalized = tag.strip().casefold()
+            if normalized not in seen_tags:
+                normalized_tags.append(normalized)
+                seen_tags.add(normalized)
+        if strategy_id is not None:
+            strategy = self.get_strategy(strategy_id)
+            if strategy.config.task_type != task_type:
+                raise ValueError("task_type does not match the strategy")
+        tags_json = _json_dump(normalized_tags)
+        metadata_json = _json_dump(metadata or {})
+        created_at = _utc_now()
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.execute(
+                    """
+                    INSERT INTO episodes
+                    (episode_id, task_type, summary, tags_json, strategy_id, score,
+                     success, metadata_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (episode_id, task_type, summary.strip(), tags_json, strategy_id,
+                     score, int(success), metadata_json, created_at),
+                )
+                self._connection.execute(
+                    """INSERT INTO events(event_type, task_type, payload_json, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    ("episode-recorded", task_type,
+                     _json_dump({"episode_id": episode_id, "strategy_id": strategy_id,
+                                 "score": score, "success": success, "tags": normalized_tags}),
+                     created_at),
+                )
+                self._connection.execute("COMMIT")
+            except sqlite3.IntegrityError as exc:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise ValueError(f"episode could not be inserted: {exc}") from exc
+            except Exception:
+                if self._connection.in_transaction:
+                    self._connection.execute("ROLLBACK")
+                raise
+        return {
+            "episode_id": episode_id, "task_type": task_type, "summary": summary.strip(),
+            "tags": normalized_tags, "strategy_id": strategy_id, "score": score,
+            "success": success, "metadata": json.loads(metadata_json), "created_at": created_at,
+        }
+
+    def search_episodes(
+        self, query: str = "", *, task_type: str | None = None,
+        tags: list[str] | tuple[str, ...] = (), limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Recall relevant recent episodes by lexical and tag overlap."""
+        if not isinstance(query, str) or len(query) > 2_000:
+            raise ValueError("query must be a string no longer than 2,000 characters")
+        if task_type is not None:
+            validate_identifier(task_type, "task_type")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("limit must be an integer from 1 to 100")
+        if isinstance(tags, str) or not isinstance(tags, (list, tuple)) or len(tags) > 32:
+            raise ValueError("tags must be a list/tuple of at most 32 strings")
+        if any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+            raise ValueError("tags must contain only non-empty strings")
+        wanted_tags = {tag.strip().casefold() for tag in tags}
+        query_terms = {term.casefold() for term in re.findall(r"[^\W_]+", query, flags=re.UNICODE) if len(term) > 2}
+        sql = "SELECT * FROM episodes"
+        clauses: list[str] = []
+        args: list[Any] = []
+        if task_type is not None:
+            clauses.append("task_type = ?")
+            args.append(task_type)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT 1000"
+        with self._lock:
+            rows = self._connection.execute(sql, args).fetchall()
+        ranked: list[tuple[float, int, dict[str, Any]]] = []
+        for recency_index, row in enumerate(rows):
+            episode_tags = json.loads(row["tags_json"])
+            summary_terms = {term.casefold() for term in re.findall(r"[^\W_]+", row["summary"], flags=re.UNICODE) if len(term) > 2}
+            tag_hits = len(wanted_tags.intersection(episode_tags))
+            term_hits = len(query_terms.intersection(summary_terms))
+            relevance = 1.0 if not query_terms and not wanted_tags else float(term_hits) + 2.0 * tag_hits
+            if relevance <= 0:
+                continue
+            item = {
+                "episode_id": row["episode_id"], "task_type": row["task_type"],
+                "summary": row["summary"], "tags": episode_tags, "strategy_id": row["strategy_id"],
+                "score": float(row["score"]), "success": bool(row["success"]),
+                "metadata": json.loads(row["metadata_json"]), "created_at": row["created_at"],
+                "relevance": relevance,
+            }
+            ranked.append((relevance, -recency_index, item))
+        ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        return [item for _, _, item in ranked[:limit]]
 
     def recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:

@@ -1,0 +1,113 @@
+"""Integration layer for workspace, memory, self-model, and guarded adaptation."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from .core import AdaptiveCore
+from .episodic_memory import EpisodicMemory
+from .evolution import Evaluator, EvolutionManager, Proposer
+from .models import EvaluationCase, StrategyConfig, validate_identifier
+from .self_model import SelfModel, SelfModelReport
+from .workspace import GlobalWorkspace, WorkspaceSignal
+
+
+@dataclass(frozen=True, slots=True)
+class CognitiveSnapshot:
+    """Compact, inspectable state assembled from the modules."""
+
+    task_type: str
+    workspace: tuple[WorkspaceSignal, ...]
+    memories: tuple[dict[str, Any], ...]
+    self_model: SelfModelReport
+
+
+class CognitiveSystem:
+    """Research scaffold for integrated cognition with a guarded learning loop."""
+
+    def __init__(
+        self, core: AdaptiveCore, *, workspace_capacity: int = 32,
+        evolution: EvolutionManager | None = None,
+    ) -> None:
+        self.core = core
+        self.store = core.store
+        self.workspace = GlobalWorkspace(capacity=workspace_capacity)
+        self.memory = EpisodicMemory(self.store)
+        self.self_model = SelfModel(core)
+        self.evolution = evolution or EvolutionManager(core)
+
+    def perceive(
+        self, *, signal_id: str, kind: str, source: str, content: str,
+        priority: float = 0.5, confidence: float = 0.5,
+    ) -> bool:
+        """Publish a bounded signal into the shared working space."""
+        return self.workspace.publish(WorkspaceSignal(
+            signal_id=signal_id, kind=kind, source=source, content=content,
+            priority=priority, confidence=confidence,
+        ))
+
+    def learn_from_outcome(
+        self, *, task_type: str, strategy_id: str, summary: str,
+        tags: list[str] | tuple[str, ...] = (), score: float, success: bool,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Store an independently assessed outcome in skill stats, memory and workspace.
+
+        Do not call this after AdaptiveRunner.record_result already recorded the same
+        outcome, or the observation would intentionally be counted twice.
+        """
+        self.core.record_result(strategy_id, score, success, metadata)
+        episode = self.memory.remember(
+            task_type, summary, tags=tags, strategy_id=strategy_id,
+            score=score, success=success, metadata=metadata,
+        )
+        self.perceive(
+            signal_id=f"outcome:{episode['episode_id'].split(':')[-1]}",
+            kind="outcome", source="evaluation",
+            content=f"{task_type}: {'success' if success else 'failure'}, score={score:.3f}; {summary[:1500]}",
+            priority=0.8 if not success else 0.6, confidence=0.9,
+        )
+        return episode
+
+    def reflect(
+        self, task_type: str, *, query: str = "",
+        memory_tags: list[str] | tuple[str, ...] = (),
+        memory_limit: int = 5, workspace_limit: int = 12,
+    ) -> CognitiveSnapshot:
+        """Assemble inspectable evidence for a planner or external language model."""
+        return CognitiveSnapshot(
+            task_type=task_type,
+            workspace=tuple(self.workspace.snapshot(limit=workspace_limit)),
+            memories=tuple(self.memory.recall(
+                query, task_type=task_type, tags=memory_tags, limit=memory_limit
+            )),
+            self_model=self.self_model.report(task_type),
+        )
+
+    def propose_module_revision(
+        self, module_name: str,
+        cases: list[EvaluationCase] | tuple[EvaluationCase, ...], *,
+        proposer: Proposer, evaluator: Evaluator,
+    ):
+        """Propose and test a new data-only strategy config for one module."""
+        validate_identifier(module_name, "module_name")
+        return self.evolution.propose_and_evaluate(
+            f"module-{module_name}", cases, proposer=proposer, evaluator=evaluator
+        )
+
+    def register_module(
+        self, module_name: str, instructions: str,
+        parameters: dict[str, Any] | None = None,
+    ):
+        """Register a stable baseline for a module's data-driven strategy."""
+        validate_identifier(module_name, "module_name")
+        task_type = f"module-{module_name}"
+        active = self.store.list_strategies(task_type, status="active")
+        if active:
+            return self.core.choose_strategy(task_type)
+        config = StrategyConfig(
+            strategy_id=f"baseline:{task_type}", task_type=task_type,
+            instructions=instructions, parameters=parameters or {},
+        )
+        return self.store.create_strategy(config, status="active")
