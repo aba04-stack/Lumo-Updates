@@ -1,0 +1,172 @@
+"""Bounded, self-directed research cycles with persistent memory and feedback."""
+from __future__ import annotations
+from dataclasses import asdict
+from typing import Any, Iterable
+from .cognition import CognitiveSystem
+from .internet_learning import InternetLearningError
+from .models import validate_score
+from .reasoning import ReasoningEngine, terms
+
+_ALLOWED_LANGUAGES = {"ar","de","en","es","fr","it","ja","kk","pt","ru","tr","uk","zh"}
+_DEFAULT_TOPICS = ("научный метод", "рассуждение", "эмоции", "обучение")
+
+class AutonomousLearningLoop:
+    """Bounded algorithmic exploration, not an LLM or neural-weight trainer.
+    Network access occurs only when run_step/run is explicitly called.
+    """
+    def __init__(self, cognitive: CognitiveSystem, *, topics: Iterable[str] | None = None, language: str = "ru", pages_per_topic: int = 2) -> None:
+        if isinstance(pages_per_topic, bool) or not isinstance(pages_per_topic, int) or not 1 <= pages_per_topic <= 3:
+            raise ValueError("pages_per_topic must be an integer from 1 to 3")
+        if not isinstance(language, str) or language not in _ALLOWED_LANGUAGES:
+            raise ValueError("unsupported language")
+        self.cognitive, self.store = cognitive, cognitive.store
+        self.reasoner: ReasoningEngine = cognitive.reasoner
+        self.language, self.pages_per_topic = language, pages_per_topic
+        has_queue = any(event["event_type"] == "autonomous-topic-queued" for event in self._events())
+        initial = tuple(topics) if topics is not None else (_DEFAULT_TOPICS if not has_queue else ())
+        for topic in initial:
+            self.queue_topic(topic, priority=0.6, reason="initial_research_goal")
+
+    def _events(self) -> list[dict[str, Any]]:
+        return self.store.recent_events(limit=10000)
+
+    @staticmethod
+    def _topic(payload: dict[str, Any]) -> str | None:
+        topic = payload.get("topic")
+        return topic.strip() if isinstance(topic, str) and topic.strip() else None
+
+    def queue_topic(self, topic: str, *, priority: float = 0.5, reason: str = "curiosity") -> bool:
+        if not isinstance(topic, str) or not topic.strip() or len(topic) > 180:
+            raise ValueError("topic must contain 1-180 characters")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 100:
+            raise ValueError("reason must contain 1-100 characters")
+        priority = validate_score(priority)
+        normalized = topic.strip()
+        known = {value.casefold() for event in self._events() if event["event_type"] == "autonomous-topic-queued" if (value := self._topic(event["payload"])) is not None}
+        if normalized.casefold() in known:
+            return False
+        self.store.record_event("autonomous-topic-queued", "autonomous-research", {"topic": normalized, "priority": priority, "reason": reason})
+        return True
+
+    def _history(self) -> tuple[list[dict[str, Any]], set[str], dict[str, int]]:
+        events = self._events()
+        queued, successful, attempts = [], set(), {}
+        for event in reversed(events):
+            payload = event["payload"]
+            if event["event_type"] == "autonomous-topic-queued":
+                topic = self._topic(payload)
+                if topic is not None:
+                    queued.append({"topic": topic, "priority": float(payload.get("priority", 0.5))})
+            elif event["event_type"] == "autonomous-research-step":
+                topic = payload.get("topic")
+                if isinstance(topic, str) and topic:
+                    key = topic.casefold()
+                    attempts[key] = attempts.get(key, 0) + 1
+                    if payload.get("documents_found", 0) > 0:
+                        successful.add(key)
+        return queued, successful, attempts
+
+    def _choose_topic(self, session_attempted: set[str]) -> str | None:
+        queued, successful, attempts = self._history()
+        state, candidates = self.cognitive.affect.state(), {}
+        for item in queued:
+            topic, key = item["topic"], item["topic"].casefold()
+            if key in successful or key in session_attempted or attempts.get(key, 0) >= 2:
+                continue
+            score = item["priority"] + 0.15 * state.curiosity - 0.15 * state.frustration
+            if attempts.get(key, 0):
+                score -= 0.2 * attempts[key]
+            candidates[topic] = max(candidates.get(topic, -1.0), score)
+        return max(candidates, key=candidates.get) if candidates else None
+
+    def _derive_topics(self, documents: list[dict[str, Any]], query: str) -> list[str]:
+        suggestions = self.reasoner.suggest_topics(documents, excluded=(query,), limit=4)
+        events = self._events()
+        queued = {topic.casefold() for event in events if event["event_type"] == "autonomous-topic-queued" if (topic := self._topic(event["payload"])) is not None}
+        attempted = {str(event["payload"].get("topic", "")).casefold() for event in events if event["event_type"] == "autonomous-research-step"}
+        added = []
+        for topic in suggestions:
+            if topic.casefold() in queued or topic.casefold() in attempted:
+                continue
+            if self.queue_topic(topic, priority=0.35, reason="derived_from_new_material"):
+                added.append(topic)
+        return added
+
+    def run_step(self, *, page_limit: int | None = None) -> dict[str, Any]:
+        effective_limit = self.pages_per_topic if page_limit is None else page_limit
+        if isinstance(effective_limit, bool) or not isinstance(effective_limit, int) or not 1 <= effective_limit <= 3:
+            raise ValueError("page_limit must be an integer from 1 to 3")
+        return self._run_one(effective_limit, set())
+
+    def _run_one(self, page_limit: int, session_attempted: set[str]) -> dict[str, Any]:
+        query = self._choose_topic(session_attempted)
+        if query is None:
+            cached = self.cognitive.internet.recall("", limit=20)
+            for topic in self.reasoner.suggest_topics(cached, limit=4):
+                self.queue_topic(topic, priority=0.25, reason="revisit_existing_knowledge")
+            query = self._choose_topic(session_attempted)
+        if query is None:
+            return {"status": "idle", "reason": "no_unattempted_topics", "documents_found": 0}
+        session_attempted.add(query.casefold())
+        self.cognitive.affect.update("task-started", intensity=0.7)
+        error, documents = None, []
+        try:
+            documents = self.cognitive.learn_from_internet(query, language=self.language, limit=page_limit)
+        except InternetLearningError as exc:
+            error = str(exc)[:240]
+            self.cognitive.affect.update("task-failed", intensity=0.7)
+        review = self.reasoner.review_documents(query, documents)
+        discovered_terms: set[str] = set()
+        for document in documents:
+            discovered_terms.update(terms(str(document.get("title", "")) + " " + str(document.get("content", ""))))
+        discovered_terms -= terms(query)
+        information_gain = validate_score(min(1.0, 0.55 * min(len(documents), page_limit) / max(1, page_limit) + 0.02 * min(len(discovered_terms), 20)))
+        next_topics = self._derive_topics(documents, query) if documents else []
+        status = "source_found_unverified" if documents else "no_source_found"
+        summary = f"Research query: {query}. Retrieved {len(documents)} page(s). Evidence status: {review.status}. Potential related terms: {', '.join(sorted(discovered_terms)[:12]) or 'none'}."
+        self.cognitive.memory.remember(
+            "autonomous-research", summary, tags=["research", "internet", "source-review", review.status],
+            strategy_id=None, score=information_gain, success=bool(documents),
+            metadata={"query": query, "status": status, "sources": list(review.source_urls),
+                "publisher_domains": list(review.publisher_domains), "retrieval_utility": information_gain,
+                "retrieval_utility_is_truth_score": False, "suggested_topics": next_topics, "error": error},
+        )
+        self.store.record_event("autonomous-research-step", "autonomous-research", {
+            "topic": query, "documents_found": len(documents), "sources": list(review.source_urls),
+            "evidence_status": review.status, "retrieval_utility": information_gain,
+            "discovered_terms": sorted(discovered_terms)[:30], "suggested_topics": next_topics, "error": error,
+        })
+        if documents:
+            self.cognitive.affect.update("information-gain", intensity=information_gain)
+            if review.status != "no_evidence":
+                self.cognitive.affect.update("uncertainty-detected", intensity=0.35)
+        elif error is None:
+            self.cognitive.affect.update("search-empty", intensity=0.7)
+        return {
+            "status": status, "topic": query, "documents_found": len(documents),
+            "source_urls": list(review.source_urls), "evidence_status": review.status,
+            "relevant_excerpts": list(review.relevant_excerpts), "caveat": review.caveat,
+            "discovered_terms": sorted(discovered_terms)[:30], "next_topics": next_topics,
+            "retrieval_utility": information_gain, "retrieval_utility_is_truth_score": False, "error": error,
+        }
+
+    def run(self, *, max_steps: int = 3, page_budget: int = 6) -> dict[str, Any]:
+        if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= 10:
+            raise ValueError("max_steps must be an integer from 1 to 10")
+        if isinstance(page_budget, bool) or not isinstance(page_budget, int) or not 1 <= page_budget <= 30:
+            raise ValueError("page_budget must be an integer from 1 to 30")
+        results, session_attempted, remaining = [], set(), page_budget
+        for _ in range(max_steps):
+            if remaining <= 0:
+                break
+            request_limit = min(self.pages_per_topic, remaining)
+            result = self._run_one(request_limit, session_attempted)
+            if result["status"] == "idle":
+                break
+            results.append(result)
+            remaining -= request_limit
+        return {
+            "steps_completed": len(results), "pages_requested_budget": page_budget,
+            "pages_budget_remaining": remaining, "documents_found": sum(item["documents_found"] for item in results),
+            "results": results, "affect": asdict(self.cognitive.affect.state()),
+        }

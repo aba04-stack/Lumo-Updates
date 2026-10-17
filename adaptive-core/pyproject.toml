@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "adaptive-core-lab"
-version = "0.3.0"
-description = "A guarded adaptive cognitive research core with source-linked web memory"
+version = "0.4.0"
+description = "An experimental adaptive cognition and bounded autonomous research core"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+
+[project.scripts]
+adaptive-research = "adaptive_core.autonomous_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
