@@ -186,6 +186,24 @@ CASES = (
         "expected_candidate": True, "expected_kind": "same_unit_numeric_mismatch",
     },
     {
+        "name": "same unordered numeric list in different order",
+        "documents": [
+            {"title": "A", "url": "https://one.example/list", "content": "The list contains 2 and 3."},
+            {"title": "B", "url": "https://two.example/list", "content": "The list contains 3 and 2."},
+        ],
+        "relation": "coexistence", "scorable": True,
+        "expected_candidate": False, "expected_kind": None,
+    },
+    {
+        "name": "swapped values attached to distinct event contexts",
+        "documents": [
+            {"title": "A", "url": "https://one.example/bridge-events", "content": "The bridge opened in 1998 and was renovated in 2001."},
+            {"title": "B", "url": "https://two.example/bridge-events", "content": "The bridge opened in 2001 and was renovated in 1998."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "year_value_mismatch",
+    },
+    {
         "name": "paraphrase and synonym remain a known miss",
         "documents": [
             {"title": "A", "url": "https://one.example/mars", "content": "Mars has 2 moons."},
@@ -242,18 +260,18 @@ def _metrics(rows):
 def test_expanded_claim_review_benchmark() -> None:
     rows = _evaluate_cases()
     metrics = _metrics(rows)
-    assert len(CASES) == 20
-    # These are precision/recall values over 17 hand-labelled, in-scope synthetic
+    assert len(CASES) == 22
+    # These are precision/recall values over 19 hand-labelled, in-scope synthetic
     # cases only. Three unscored cases remain visible as policy/coverage limits
     # and are not hidden inside the headline metrics.
-    assert metrics["scored_cases"] == 17
+    assert metrics["scored_cases"] == 19
     assert metrics["false_positives"] == 0, metrics
     assert metrics["false_negatives"] == 0, metrics
     assert metrics["precision"] == 1.0
     assert metrics["recall"] == 1.0
     assert metrics["known_limitation_cases"] == 3
-    assert metrics["true_positives"] == 10
-    assert metrics["true_negatives"] == 7
+    assert metrics["true_positives"] == 11
+    assert metrics["true_negatives"] == 8
 
 
 def test_benchmark_reports_known_unscored_cases_instead_of_claiming_general_accuracy() -> None:
