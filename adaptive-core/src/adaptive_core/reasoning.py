@@ -332,10 +332,34 @@ class ReasoningEngine:
         """
         if isinstance(max_findings, bool) or not isinstance(max_findings, int) or not 1 <= max_findings <= 100:
             raise ValueError("max_findings must be an integer from 1 to 100")
-        items = [
-            claim for claim in _collect_limited(claims, 200, "claims")
-            if isinstance(claim, dict)
-        ]
+        raw_items = _collect_limited(claims, 200, "claims")
+        items: list[dict[str, Any]] = []
+        seen_claim_ids: set[str] = set()
+        for claim in raw_items:
+            if not isinstance(claim, dict):
+                continue
+            claim_id = claim.get("claim_id")
+            safe_url = safe_https_source_url(claim.get("source_url"))
+            text_value = claim.get("text")
+            raw_terms = claim.get("comparison_terms")
+            polarity = claim.get("polarity")
+            if (
+                not isinstance(claim_id, str) or not claim_id.strip() or len(claim_id) > 120
+                or claim_id in seen_claim_ids
+                or safe_url is None
+                or not isinstance(text_value, str) or not text_value.strip() or len(text_value) > 800
+                or not isinstance(raw_terms, (list, tuple)) or not 2 <= len(raw_terms) <= 100
+                or any(not isinstance(term, str) or not term.strip() or len(term) > 80 for term in raw_terms)
+                or polarity not in {"affirmed", "negated"}
+            ):
+                continue
+            seen_claim_ids.add(claim_id)
+            normalized_claim = dict(claim)
+            normalized_claim["source_url"] = safe_url
+            normalized_claim["comparison_terms"] = sorted(set(term.casefold() for term in raw_terms))
+            if not isinstance(normalized_claim.get("numeric_mentions"), list):
+                normalized_claim["numeric_mentions"] = []
+            items.append(normalized_claim)
         findings: list[dict[str, Any]] = []
         seen_pairs: set[tuple[str, str, str]] = set()
         for index, first in enumerate(items):
