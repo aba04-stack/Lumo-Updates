@@ -152,15 +152,15 @@ class AffectEngine:
 
     def state(self) -> AffectState:
         for event in self.store.events_of_types(["affect-state-updated"], limit=1000, newest_first=True):
-                payload = event["payload"].get("state", {})
-                try:
-                    values = {name: validate_score(payload[name]) for name in _BASELINE}
-                    updated_at = payload.get("updated_at", event["created_at"])
-                    if not isinstance(updated_at, str):
-                        break
-                    return AffectState(**values, updated_at=updated_at)
-                except (KeyError, ValueError):
-                    break
+            payload = event["payload"].get("state", {})
+            try:
+                values = {name: validate_score(payload[name]) for name in _BASELINE}
+                updated_at = payload.get("updated_at", event["created_at"])
+                if not isinstance(updated_at, str):
+                    continue
+                return AffectState(**values, updated_at=updated_at)
+            except (KeyError, ValueError):
+                continue
         return AffectState()
 
     def _transition(self, features: dict[str, float], *, trigger: str) -> AffectState:
