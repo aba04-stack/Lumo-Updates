@@ -204,3 +204,34 @@ def test_drive_state_ignores_malformed_latest_state_event() -> None:
         )
         store.record_event("motivation-state-updated", "motivation", {"state": "corrupted"})
         assert engine.state() == expected
+
+
+def test_goal_verification_and_status_are_one_atomic_unit() -> None:
+    with Store(":memory:") as store:
+        engine = MotivationEngine(store)
+        goal = engine.add_goal("Atomic verification", drive="uncertainty_reduction")
+        engine.set_goal_status(goal.goal_id, "active")
+        engine.set_goal_status(goal.goal_id, "needs_verification")
+        with pytest.raises(RuntimeError, match="abort verification"):
+            with store.transaction():
+                store.record_event(
+                    "motivation-goal-verification-recorded", "motivation",
+                    {
+                        "goal_id": goal.goal_id, "verification_id": "manual-test-verification",
+                        "method": "manual_review", "reviewer": "test",
+                        "criteria": ["check criteria"], "evidence_refs": ["https://source.example/fact"],
+                        "claim_verified": False, "reviewer_authenticated": False,
+                    },
+                )
+                store.record_event(
+                    "motivation-goal-status", "motivation",
+                    {
+                        "goal_id": goal.goal_id, "from": "needs_verification",
+                        "status": "completed", "verification_id": "manual-test-verification",
+                    },
+                )
+                raise RuntimeError("abort verification")
+        assert next(item for item in engine.goals() if item.goal_id == goal.goal_id).status == "needs_verification"
+        assert store.events_of_types(
+            ["motivation-goal-verification-recorded"], limit=10, newest_first=True
+        ) == []
