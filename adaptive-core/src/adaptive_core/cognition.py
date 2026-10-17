@@ -69,6 +69,12 @@ class CognitiveSystem:
         source_documents = list(documents) if documents is not None else self.internet.recall(query, limit=10)
         return self.reasoner.review_documents(query, source_documents)
 
+    def assess_claim(self, claim: dict[str, Any], evidence: Iterable[dict[str, Any]], *,
+                     backend: Any, min_confidence: float = 0.75) -> dict[str, Any]:
+        """Run a caller-supplied semantic assessment without auto-completing goals."""
+        from .claim_verification import ClaimVerificationEngine
+        return ClaimVerificationEngine(backend, min_confidence=min_confidence).assess_claim(claim, evidence)
+
     def autonomous_learning_loop(self, *, topics: Iterable[str] | None = None, language: str = "ru",
                                  pages_per_topic: int = 2):
         from .autonomy import AutonomousLearningLoop
