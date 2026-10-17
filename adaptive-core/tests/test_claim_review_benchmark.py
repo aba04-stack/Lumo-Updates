@@ -168,6 +168,24 @@ CASES = (
         "expected_candidate": False, "expected_kind": None,
     },
     {
+        "name": "Russian direct negation",
+        "documents": [
+            {"title": "A", "url": "https://one.example/earth-ru", "content": "Земля круглая."},
+            {"title": "B", "url": "https://two.example/earth-ru", "content": "Земля не круглая."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "opposite_polarity_lexical_match",
+    },
+    {
+        "name": "Russian number words are treated as counts",
+        "documents": [
+            {"title": "A", "url": "https://one.example/mars-ru", "content": "У Марса два спутника."},
+            {"title": "B", "url": "https://two.example/mars-ru", "content": "У Марса три спутника."},
+        ],
+        "relation": "contradiction", "scorable": True,
+        "expected_candidate": True, "expected_kind": "same_unit_numeric_mismatch",
+    },
+    {
         "name": "paraphrase and synonym remain a known miss",
         "documents": [
             {"title": "A", "url": "https://one.example/mars", "content": "Mars has 2 moons."},
@@ -224,17 +242,17 @@ def _metrics(rows):
 def test_expanded_claim_review_benchmark() -> None:
     rows = _evaluate_cases()
     metrics = _metrics(rows)
-    assert len(CASES) == 18
-    # These are precision/recall values over 15 hand-labelled, in-scope synthetic
+    assert len(CASES) == 20
+    # These are precision/recall values over 17 hand-labelled, in-scope synthetic
     # cases only. Three unscored cases remain visible as policy/coverage limits
     # and are not hidden inside the headline metrics.
-    assert metrics["scored_cases"] == 15
+    assert metrics["scored_cases"] == 17
     assert metrics["false_positives"] == 0, metrics
     assert metrics["false_negatives"] == 0, metrics
     assert metrics["precision"] == 1.0
     assert metrics["recall"] == 1.0
     assert metrics["known_limitation_cases"] == 3
-    assert metrics["true_positives"] == 8
+    assert metrics["true_positives"] == 10
     assert metrics["true_negatives"] == 7
 
 
