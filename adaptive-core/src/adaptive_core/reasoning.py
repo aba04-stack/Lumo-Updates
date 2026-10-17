@@ -109,6 +109,9 @@ _CLAIM_STOPWORDS = {
     "grams", "gram", "milligrams", "milligram", "percent", "percentage",
     "hours", "hour", "minutes", "minute", "seconds", "second", "days", "day",
     "years", "year", "million", "millions", "billion", "billions", "thousand",
+    # Cardinal words are parsed as numbers, not topical terms.
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "devoid",
     "километров", "километр", "километры", "метров", "метр", "метры",
     "граммов", "грамм", "килограммов", "килограмм", "процентов", "процент",
     "часов", "часа", "час", "минут", "минута", "минуты", "секунд", "секунда", "секунды",
@@ -120,19 +123,43 @@ _NEGATION_PATTERNS = (
     r"\bisn't\b", r"\baren't\b", r"\bwasn't\b", r"\bweren't\b",
     r"\bwon't\b", r"\bне\b", r"\bнет\b", r"\bникогда\b", r"\bбез\b",
     r"\bнельзя\b", r"\bне\s+является\b", r"\bне\s+имеет\b",
+    r"\bdevoid\s+of\b", r"\blacks?\b",
 )
 
+_NON_PLURAL_FINAL_S = {
+    "analysis", "basis", "business", "crisis", "news", "physics",
+    "series", "species", "status", "thesis", "venus",
+}
+
+
+def _normalize_comparison_term(token: str) -> str:
+    """Apply a tiny, explicit English plural heuristic; not full stemming."""
+    normalized = token.casefold()
+    if (
+        len(normalized) > 4
+        and normalized.endswith("s")
+        and not normalized.endswith(("ss", "us", "is"))
+        and normalized not in _NON_PLURAL_FINAL_S
+    ):
+        normalized = normalized[:-1]
+    return normalized
+
+
 def _claim_comparison_terms(text: str) -> set[str]:
-    return {
-        token.casefold()
-        for token in re.findall(r"[^\W_]+", text, flags=re.UNICODE)
-        if len(token) > 2
-        and not token.isdigit()
-        and token.casefold() not in _CLAIM_STOPWORDS
-    }
+    result: set[str] = set()
+    for token in re.findall(r"[^\W_]+", text, flags=re.UNICODE):
+        normalized = token.casefold()
+        if (
+            len(normalized) > 2
+            and not normalized.isdigit()
+            and normalized not in _CLAIM_STOPWORDS
+        ):
+            result.add(_normalize_comparison_term(normalized))
+    return result
 
 _NUMERIC_PATTERN = re.compile(
-    r"(?<![\w])(?P<number>\d{1,3}(?:[ ,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)"
+    r"(?<![\w])(?P<number>\d{1,3}(?:[ ,]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?|"
+    r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
     r"\s*(?P<unit>%|percent(?:age)?|per\s+cent|km|kilometers?|kilometres?|"
     r"miles?|meters?|metres?|kg|kilograms?|g|grams?|mg|milligrams?|"
     r"°\s*[cf]|celsius|fahrenheit|hours?|minutes?|seconds?|days?|years?|"
@@ -192,7 +219,13 @@ def _extract_numeric_mentions(text: str) -> list[dict[str, Any]]:
     mentions: list[dict[str, Any]] = []
     for match in _NUMERIC_PATTERN.finditer(text):
         raw = match.group("number")
-        numeric_value = _decimal_value(raw)
+        word_values = {
+            "zero": "0", "one": "1", "two": "2", "three": "3",
+            "four": "4", "five": "5", "six": "6", "seven": "7",
+            "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
+            "twelve": "12",
+        }
+        numeric_value = word_values.get(raw.casefold()) or _decimal_value(raw)
         if numeric_value is None:
             continue
         raw_unit = (match.group("unit") or "").casefold()
@@ -223,6 +256,38 @@ def _claim_polarity(text: str) -> str:
     if any(re.search(pattern, lowered, flags=re.UNICODE) for pattern in _NEGATION_PATTERNS):
         return "negated"
     return "affirmed"
+
+_EXISTENTIAL_SCOPE_PATTERNS = (
+    r"\bsome\b", r"\bseveral\b", r"\ba\s+few\b", r"\bat\s+least\s+one\b",
+)
+
+
+def _both_existentially_scoped(first_text: str, second_text: str) -> bool:
+    """Avoid calling two compatible 'some ...' statements conflicts."""
+    def has_existential_scope(text: str) -> bool:
+        lowered = text.casefold()
+        return any(re.search(pattern, lowered, flags=re.UNICODE) for pattern in _EXISTENTIAL_SCOPE_PATTERNS)
+
+    return has_existential_scope(first_text) and has_existential_scope(second_text)
+
+
+def _numeric_mentions_are_disjoint(first: Any, second: Any) -> bool:
+    """Be conservative when opposite-polarity claims report different numbers."""
+    first_numbers = first.get("numeric_mentions", [])
+    second_numbers = second.get("numeric_mentions", [])
+    if not isinstance(first_numbers, list) or not isinstance(second_numbers, list):
+        return False
+    valid_first = [item for item in first_numbers if isinstance(item, dict)]
+    valid_second = [item for item in second_numbers if isinstance(item, dict)]
+    if not valid_first or not valid_second:
+        return False
+    return not any(
+        left.get("kind") == right.get("kind")
+        and left.get("unit") == right.get("unit")
+        and left.get("value") == right.get("value")
+        for left in valid_first
+        for right in valid_second
+    )
 
 @dataclass(frozen=True, slots=True)
 class EvidenceReview:
@@ -397,7 +462,9 @@ class ReasoningEngine:
             seen_claim_ids.add(claim_id)
             normalized_claim = dict(claim)
             normalized_claim["source_url"] = safe_url
-            normalized_claim["comparison_terms"] = sorted(set(term.casefold() for term in raw_terms))
+            normalized_claim["comparison_terms"] = sorted(set(
+                _normalize_comparison_term(term.casefold()) for term in raw_terms
+            ))
             if not isinstance(normalized_claim.get("numeric_mentions"), list):
                 normalized_claim["numeric_mentions"] = []
             items.append(normalized_claim)
@@ -421,6 +488,15 @@ class ReasoningEngine:
                 kind: str | None = None
                 values: list[dict[str, Any]] = []
                 if first.get("polarity") != second.get("polarity"):
+                    first_text = first.get("text", "")
+                    second_text = second.get("text", "")
+                    # Two existential statements may both be true for different
+                    # members. Divergent numeric contexts are not sufficient to
+                    # justify a polarity-only conflict flag.
+                    if _both_existentially_scoped(first_text, second_text):
+                        continue
+                    if _numeric_mentions_are_disjoint(first, second):
+                        continue
                     kind = "opposite_polarity_lexical_match"
                 else:
                     first_numbers = first.get("numeric_mentions", [])
