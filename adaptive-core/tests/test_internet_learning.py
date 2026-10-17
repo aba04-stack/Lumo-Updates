@@ -200,3 +200,29 @@ def test_web_knowledge_store_serializes_concurrent_writes_to_one_connection(tmp_
         recalled = store.search("source content", limit=20)
         assert len(recalled) == 16
         assert {item["url"] for item in recalled} == {item["url"] for item in saved}
+
+
+def test_request_rejects_same_host_redirect_with_userinfo(monkeypatch, tmp_path) -> None:
+    import json
+    import adaptive_core.internet_learning as internet_module
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def geturl(self):
+            return "https://user@ru.wikipedia.org/w/api.php"
+
+        def read(self, size=-1):
+            return json.dumps({"query": {"search": []}}).encode("utf-8")
+
+    monkeypatch.setattr(internet_module, "urlopen", lambda request, timeout: FakeResponse())
+    learner = WikipediaLearner(tmp_path / "redirect-test.sqlite3")
+    with pytest.raises(InternetLearningError, match="redirected"):
+        learner._request_json("ru", {"action": "query"})
+    learner.close()
