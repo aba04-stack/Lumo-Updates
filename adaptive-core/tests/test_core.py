@@ -2,7 +2,28 @@ from __future__ import annotations
 
 import pytest
 
-from adaptive_core import AdaptiveCore, NoActiveStrategyError, Store, StrategyConfig
+from adaptive_core import AdaptiveCore, EvaluationCase, EvolutionManager, NoActiveStrategyError, Store, StrategyConfig
+
+
+def promote_candidate_for_test(core, baseline, strategy_id: str, task_type: str, instructions: str):
+    candidate = core.register_candidate(
+        StrategyConfig(
+            strategy_id, task_type, instructions,
+            version=baseline.config.version + 1,
+        ),
+        parent_id=baseline.config.strategy_id,
+    )
+    cases = [
+        EvaluationCase(f"{strategy_id}-case-{i}", task_type, f"fixed-input-{i}", "expected")
+        for i in range(1, 6)
+    ]
+    decision = EvolutionManager(core).evaluate_candidate(
+        strategy_id,
+        cases,
+        lambda strategy, case: 0.92 if strategy.strategy_id == strategy_id else 0.20,
+    )
+    assert decision.accepted, decision.reason
+    return core.store.get_strategy(strategy_id)
 
 
 def test_core_learns_from_measured_feedback_and_persists(tmp_path) -> None:
@@ -10,10 +31,8 @@ def test_core_learns_from_measured_feedback_and_persists(tmp_path) -> None:
     store = Store(db_path)
     core = AdaptiveCore(store)
     baseline = core.create_baseline("math")
-    challenger = store.create_strategy(
-        StrategyConfig("challenger", "math", "Check the arithmetic twice."),
-        status="active",
-        parent_id=baseline.config.strategy_id,
+    challenger = promote_candidate_for_test(
+        core, baseline, "challenger", "math", "Check the arithmetic twice."
     )
 
     for _ in range(30):
@@ -62,9 +81,8 @@ def test_disabling_best_strategy_keeps_fallback() -> None:
     with Store(":memory:") as store:
         core = AdaptiveCore(store)
         baseline = core.create_baseline("math")
-        better = store.create_strategy(
-            StrategyConfig("better", "math", "Improved calculation strategy."),
-            status="active",
+        better = promote_candidate_for_test(
+            core, baseline, "better", "math", "Improved calculation strategy."
         )
         for _ in range(20):
             core.record_result(baseline.config.strategy_id, 0.25, False)
@@ -82,4 +100,17 @@ def test_strategy_ids_are_immutable() -> None:
         config = StrategyConfig("same-id", "math", "Original")
         store.create_strategy(config, status="active")
         with pytest.raises(ValueError, match="could not be inserted"):
-            store.create_strategy(config, status="active")
+            store.create_strategy(config, status="candidate")
+
+
+def test_second_active_strategy_must_pass_evaluation_gate() -> None:
+    with Store(":memory:") as store:
+        core = AdaptiveCore(store)
+        baseline = core.create_baseline("protected-activation")
+        with pytest.raises(ValueError, match="pass fixed-case evaluation"):
+            store.create_strategy(
+                StrategyConfig("unchecked-active", "protected-activation", "Bypass evaluation."),
+                status="active",
+            )
+        assert store.get_strategy(baseline.config.strategy_id).status == "active"
+        assert store.list_strategies("protected-activation", status="candidate") == []
