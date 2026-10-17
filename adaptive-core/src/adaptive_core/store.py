@@ -82,6 +82,7 @@ class Store:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_events_type_id ON events(event_type, id);
                 CREATE TABLE IF NOT EXISTS episodes (
                     episode_id TEXT PRIMARY KEY,
                     task_type TEXT NOT NULL,
@@ -424,6 +425,58 @@ class Store:
         ranked.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
         return [item for _, _, item in ranked[:limit]]
 
+    @staticmethod
+    def _event_record(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "event_type": row["event_type"],
+            "task_type": row["task_type"],
+            "payload": json.loads(row["payload_json"]),
+            "created_at": row["created_at"],
+        }
+
+    def latest_event(self, event_type: str) -> dict[str, Any] | None:
+        """Fetch the newest event of one type without a global history window."""
+        if not isinstance(event_type, str) or not event_type or len(event_type) > 128:
+            raise ValueError("event_type must contain 1-128 characters")
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM events WHERE event_type = ? ORDER BY id DESC LIMIT 1",
+                (event_type,),
+            ).fetchone()
+        return self._event_record(row) if row is not None else None
+
+    def events_of_types(
+        self,
+        event_types: list[str] | tuple[str, ...],
+        *,
+        limit: int | None = None,
+        newest_first: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Query selected event streams; optionally return all matching history."""
+        if (
+            isinstance(event_types, (str, bytes))
+            or not isinstance(event_types, (list, tuple))
+            or not 1 <= len(event_types) <= 32
+        ):
+            raise ValueError("event_types must be a list/tuple of 1-32 event names")
+        if any(not isinstance(value, str) or not value or len(value) > 128 for value in event_types):
+            raise ValueError("each event type must contain 1-128 characters")
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100_000
+        ):
+            raise ValueError("limit must be None or an integer from 1 to 100,000")
+        placeholders = ",".join("?" for _ in event_types)
+        direction = "DESC" if newest_first else "ASC"
+        query = f"SELECT * FROM events WHERE event_type IN ({placeholders}) ORDER BY id {direction}"
+        args: tuple[Any, ...] = tuple(event_types)
+        if limit is not None:
+            query += " LIMIT ?"
+            args += (limit,)
+        with self._lock:
+            rows = self._connection.execute(query, args).fetchall()
+        return [self._event_record(row) for row in rows]
+
     def recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
             raise ValueError("limit must be an integer from 1 to 10,000")
@@ -431,13 +484,4 @@ class Store:
             rows = self._connection.execute(
                 "SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
-        return [
-            {
-                "id": int(row["id"]),
-                "event_type": row["event_type"],
-                "task_type": row["task_type"],
-                "payload": json.loads(row["payload_json"]),
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+        return [self._event_record(row) for row in rows]
