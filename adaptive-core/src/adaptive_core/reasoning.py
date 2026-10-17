@@ -5,8 +5,8 @@ import re
 from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass
 from typing import Any, Iterable
-from urllib.parse import urlparse
 from .models import validate_score
+from .source_safety import registered_publisher_domain, safe_https_source_url
 
 def terms(text: str) -> set[str]:
     return {word.casefold() for word in re.findall(r"[^\W_]+", text, flags=re.UNICODE) if len(word) > 2}
@@ -264,11 +264,12 @@ class ReasoningEngine:
             url, title, content = item.get("url"), item.get("title", ""), item.get("content", "")
             if not isinstance(url, str) or not isinstance(title, str) or not isinstance(content, str):
                 continue
-            parsed = urlparse(url)
-            if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            safe_url = safe_https_source_url(url)
+            if safe_url is None or not content.strip():
                 continue
-            publisher = parsed.hostname.lower()
-            if not content.strip():
+            try:
+                publisher = registered_publisher_domain(safe_url)
+            except ValueError:
                 continue
             sentences = [
                 sentence.strip()
@@ -284,18 +285,18 @@ class ReasoningEngine:
                 words = re.findall(r"[^\W_]+", sentence, flags=re.UNICODE)
                 if len(words) < 3:
                     continue
-                dedupe_key = (url, sentence.casefold())
+                dedupe_key = (safe_url, sentence.casefold())
                 if dedupe_key in seen:
                     continue
                 seen.add(dedupe_key)
                 digest = hashlib.sha256(
-                    (url + "\0" + sentence.casefold()).encode("utf-8")
+                    (safe_url + "\0" + sentence.casefold()).encode("utf-8")
                 ).hexdigest()[:20]
                 claims.append({
                     "claim_id": digest,
                     "text": sentence,
                     "title": title[:300],
-                    "source_url": url,
+                    "source_url": safe_url,
                     "publisher_domain": publisher,
                     "observed_at": item.get("fetched_at") if isinstance(item.get("fetched_at"), str) else None,
                     "source_hash": item.get("content_sha256") if isinstance(item.get("content_sha256"), str) else None,
@@ -433,12 +434,15 @@ class ReasoningEngine:
             url, title, content = item.get("url"), item.get("title", ""), item.get("content", "")
             if not isinstance(url, str) or not isinstance(title, str) or not isinstance(content, str):
                 continue
-            parsed = urlparse(url)
-            if parsed.scheme != "https" or not parsed.hostname:
+            safe_url = safe_https_source_url(url)
+            if safe_url is None or not content.strip():
                 continue
-            source_urls.append(url)
-            labels = parsed.hostname.lower().split(".")
-            publishers.add(".".join(labels[-2:]) if len(labels) >= 2 else labels[0])
+            try:
+                publisher = registered_publisher_domain(safe_url)
+            except ValueError:
+                continue
+            source_urls.append(safe_url)
+            publishers.add(publisher)
             sentences = [s.strip() for s in re.split(r"(?<=[.!?。！？])\s+", content) if s.strip()]
             if not sentences and content.strip():
                 sentences = [content.strip()]
