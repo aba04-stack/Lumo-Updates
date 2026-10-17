@@ -99,6 +99,7 @@ def test_integrated_snapshot_contains_shared_state_memory_and_self_model() -> No
         assert snapshot.workspace
         assert snapshot.memories
         assert snapshot.self_model.observation_count == 1
+        assert snapshot.motivation.competence > 0.42
 
 
 def test_module_revision_is_proposed_and_gated() -> None:
