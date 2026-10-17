@@ -295,7 +295,11 @@ class ReasoningEngine:
             if not isinstance(item, dict):
                 continue
             url, title, content = item.get("url"), item.get("title", ""), item.get("content", "")
-            if not isinstance(url, str) or not isinstance(title, str) or not isinstance(content, str):
+            if (
+                not isinstance(url, str) or len(url) > 2_000
+                or not isinstance(title, str) or len(title) > 500
+                or not isinstance(content, str) or len(content) > 20_000
+            ):
                 continue
             safe_url = safe_https_source_url(url)
             if safe_url is None or not content.strip():
@@ -489,7 +493,11 @@ class ReasoningEngine:
             if not isinstance(item, dict):
                 continue
             url, title, content = item.get("url"), item.get("title", ""), item.get("content", "")
-            if not isinstance(url, str) or not isinstance(title, str) or not isinstance(content, str):
+            if (
+                not isinstance(url, str) or len(url) > 2_000
+                or not isinstance(title, str) or len(title) > 500
+                or not isinstance(content, str) or len(content) > 20_000
+            ):
                 continue
             safe_url = safe_https_source_url(url)
             if safe_url is None or not content.strip():
@@ -534,11 +542,11 @@ class ReasoningEngine:
             if not isinstance(document, dict):
                 continue
             title, content = document.get("title", ""), document.get("content", "")
-            if isinstance(title, str):
+            if isinstance(title, str) and len(title) <= 500:
                 clean_title = title.strip()
                 if 3 <= len(clean_title) <= 80 and clean_title.casefold() not in excluded_set:
                     candidates[clean_title] = candidates.get(clean_title, 0) + 5
-            if not isinstance(content, str):
+            if not isinstance(content, str) or len(content) > 20_000:
                 continue
             counts: dict[str, int] = {}
             for word in re.findall(r"[^\W_]+", content.casefold(), flags=re.UNICODE):
