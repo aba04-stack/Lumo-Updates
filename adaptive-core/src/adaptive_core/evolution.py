@@ -59,8 +59,7 @@ class EvolutionManager:
         baseline = self.core.choose_strategy(task_type)
         recent = [
             {"event_type": event["event_type"], "created_at": event["created_at"]}
-            for event in reversed(self.store.recent_events(limit=200))
-            if event["task_type"] == task_type
+            for event in reversed(self.store.events_for_task(task_type, limit=200, newest_first=True))
         ][-20:]
         feedback: dict[str, Any] = {
             "task_type": task_type,
