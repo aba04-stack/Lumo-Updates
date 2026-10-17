@@ -1,3 +1,4 @@
+from itertools import permutations
 from __future__ import annotations
 import pytest
 from adaptive_core import InferenceRule, KnowledgeFact, ReasoningEngine
@@ -347,3 +348,18 @@ def test_topic_suggestions_bound_exclusions_before_consuming() -> None:
     with pytest.raises(ValueError, match="at most 100 excluded topics"):
         ReasoningEngine().suggest_topics([], excluded=endless_exclusions())
     assert consumed == 101
+
+
+def test_all_permutations_of_an_unordered_numeric_set_do_not_conflict() -> None:
+    engine = ReasoningEngine()
+    documents = [
+        {
+            "title": f"Permutation {index}",
+            "url": f"https://publisher-{index}.example/list",
+            "content": f"The list contains {a}, {b}, and {c}.",
+        }
+        for index, (a, b, c) in enumerate(permutations((1, 2, 3)))
+    ]
+    claims = engine.extract_claims(documents, max_claims=50)
+    assert len(claims) == 6
+    assert engine.detect_potential_contradictions(claims, max_findings=100) == ()
