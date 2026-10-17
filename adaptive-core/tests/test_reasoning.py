@@ -330,3 +330,20 @@ def test_reasoner_skips_oversized_external_documents() -> None:
     review = engine.review_documents("claim", [huge])
     assert review.source_urls == ()
     assert review.extracted_claims == ()
+
+
+def test_topic_suggestions_bound_exclusions_before_consuming() -> None:
+    with pytest.raises(ValueError, match="not a single string"):
+        ReasoningEngine().suggest_topics([], excluded="one topic")
+
+    consumed = 0
+
+    def endless_exclusions():
+        nonlocal consumed
+        while True:
+            consumed += 1
+            yield f"exclude-{consumed}"
+
+    with pytest.raises(ValueError, match="at most 100 excluded topics"):
+        ReasoningEngine().suggest_topics([], excluded=endless_exclusions())
+    assert consumed == 101
