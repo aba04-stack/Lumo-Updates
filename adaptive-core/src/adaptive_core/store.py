@@ -83,6 +83,7 @@ class Store:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_events_type_id ON events(event_type, id);
+                CREATE INDEX IF NOT EXISTS idx_events_task_id ON events(task_type, id);
                 CREATE TABLE IF NOT EXISTS episodes (
                     episode_id TEXT PRIMARY KEY,
                     task_type TEXT NOT NULL,
@@ -568,6 +569,27 @@ class Store:
             args += (limit,)
         with self._lock:
             rows = self._connection.execute(query, args).fetchall()
+        return [self._event_record(row) for row in rows]
+
+    def events_for_task(
+        self,
+        task_type: str,
+        *,
+        limit: int = 100,
+        newest_first: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Query one task's event stream without unrelated-task history noise."""
+        validate_identifier(task_type, "task_type")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100_000:
+            raise ValueError("limit must be an integer from 1 to 100,000")
+        if not isinstance(newest_first, bool):
+            raise ValueError("newest_first must be a bool")
+        direction = "DESC" if newest_first else "ASC"
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT * FROM events WHERE task_type = ? ORDER BY id {direction} LIMIT ?",
+                (task_type, limit),
+            ).fetchall()
         return [self._event_record(row) for row in rows]
 
     def recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
