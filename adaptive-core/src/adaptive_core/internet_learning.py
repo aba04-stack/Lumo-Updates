@@ -226,9 +226,20 @@ class WikipediaLearner:
         )
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                final_url = urlparse(response.geturl())
-                if final_url.scheme != "https" or final_url.hostname != host:
-                    raise InternetLearningError("Wikipedia redirected to an unexpected host")
+                try:
+                    final_url = urlparse(response.geturl())
+                    final_host = final_url.hostname
+                    final_port = final_url.port
+                except (TypeError, ValueError) as exc:
+                    raise InternetLearningError("Wikipedia redirected to an invalid URL") from exc
+                if (
+                    final_url.scheme != "https"
+                    or final_host != host
+                    or final_url.username is not None
+                    or final_url.password is not None
+                    or final_port is not None
+                ):
+                    raise InternetLearningError("Wikipedia redirected to an unexpected host or authority")
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
                 if len(raw) > _MAX_RESPONSE_BYTES:
                     raise InternetLearningError("Wikipedia response exceeded the size limit")
