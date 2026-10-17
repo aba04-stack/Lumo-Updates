@@ -218,7 +218,7 @@ class WikipediaLearner:
             headers={
                 "Accept": "application/json",
                 "User-Agent": (
-                    "AdaptiveCoreLab/0.11.1 (educational research; "
+                    "AdaptiveCoreLab/0.11.2 (educational research; "
                     "https://github.com/aba04-stack/Lumo-Updates)"
                 ),
             },
