@@ -323,6 +323,23 @@ def _numeric_mentions_are_disjoint(first: Any, second: Any) -> bool:
         for right in valid_second
     )
 
+def _same_numeric_multiset(first: Any, second: Any) -> bool:
+    """Do not call reordered representations of the same numeric set a conflict."""
+    first_numbers = first.get("numeric_mentions", [])
+    second_numbers = second.get("numeric_mentions", [])
+    if not isinstance(first_numbers, list) or not isinstance(second_numbers, list):
+        return False
+    left = [item for item in first_numbers if isinstance(item, dict)]
+    right = [item for item in second_numbers if isinstance(item, dict)]
+    if not left or len(left) != len(right):
+        return False
+
+    def key(item: dict[str, Any]) -> tuple[str, str, str]:
+        return str(item.get("kind")), str(item.get("unit")), str(item.get("value"))
+
+    return sorted(key(item) for item in left) == sorted(key(item) for item in right)
+
+
 def _numeric_context_signature(text: Any, mention: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
     """Capture nearby content words around a number, excluding the number itself."""
     if not isinstance(text, str):
@@ -558,6 +575,11 @@ class ReasoningEngine:
                         continue
                     kind = "opposite_polarity_lexical_match"
                 else:
+                    # Reordered lists such as "2 and 3" vs "3 and 2" carry
+                    # the same numeric facts; do not treat each cross-pair as
+                    # contradictory merely because the order changed.
+                    if _same_numeric_multiset(first, second):
+                        continue
                     first_numbers = first.get("numeric_mentions", [])
                     second_numbers = second.get("numeric_mentions", [])
                     if not isinstance(first_numbers, list) or not isinstance(second_numbers, list):
